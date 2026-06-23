@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+*.dump
+*.sql
+
+# except schema
+!database/schema.sql
+!database/seed.sql
