@@ -1,0 +1,14 @@
+{
+  "name": "SportRes",
+  "short_name": "SportRes",
+  "description": "SportRes - Court Booking, Player Matching & Sports Community Platform",
+  "start_url": "/",
+  "display": "standalone",
+  "icons": [
+    {
+      "src": "/sportres-logo.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

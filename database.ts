@@ -1,0 +1,13 @@
+import pg from 'pg';
+
+const { Pool } = pg;
+
+if (!process.env.DATABASE_URL) {
+  console.warn('[SportRes DB] DATABASE_URL is not set. Database API routes will fail until it is configured.');
+}
+
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+export const query = <T = any>(text: string, params?: any[]) => pool.query<T>(text, params);

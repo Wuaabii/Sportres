@@ -1,0 +1,6 @@
+{
+  "name": "SportRes",
+  "description": "Nền tảng thể thao tích hợp tìm sân, đặt sân và kết nối người chơi chuyên nghiệp",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
