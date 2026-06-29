@@ -4,6 +4,7 @@ import { SportType } from '../types';
 import { Star, Sparkles, Bell, TicketPercent, MapPin } from 'lucide-react';
 import { SafeImage } from './SafeImage';
 import { NotificationsOverlay } from './NotificationsOverlay';
+import { getVenueCardImage } from '../utils/venueImages';
 
 interface HomeTabProps {
   setActiveTab: (tab: string) => void;
@@ -12,8 +13,9 @@ interface HomeTabProps {
 }
 
 export const HomeTab: React.FC<HomeTabProps> = ({ setActiveTab, setSportFilter, onOpenAi }) => {
-  const { user, courts, setSelectedCourtId } = useSport();
+  const { user, courts, notifications, setSelectedCourtId } = useSport();
   const [showNotifications, setShowNotifications] = useState(false);
+  const unreadNotifications = notifications.filter(notification => !notification.isRead).length;
 
   const handleSeeMoreCourt = (courtId: string, sport: SportType) => {
     setSelectedCourtId(courtId);
@@ -52,13 +54,20 @@ export const HomeTab: React.FC<HomeTabProps> = ({ setActiveTab, setSportFilter, 
           className="w-10 h-10 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 rounded-full flex items-center justify-center relative cursor-pointer"
         >
           <Bell size={18} />
-          {/* Notification red badged indicator */}
-          <span className="absolute top-2.5 right-2.5 w-2 h-2 bg-red-500 rounded-full"></span>
+          {unreadNotifications > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 bg-red-500 text-white rounded-full border border-white text-[8px] font-black flex items-center justify-center">
+              {unreadNotifications}
+            </span>
+          )}
         </button>
       </div>
 
       {/* SportRes AI assistant Prominent Action Banner */}
-      <div className="bg-gradient-to-tr from-emerald-600 to-teal-500 text-white rounded-2xl p-3.5 shadow-md border border-emerald-400/20 text-left relative overflow-hidden">
+      <button
+        type="button"
+        onClick={onOpenAi}
+        className="w-full bg-gradient-to-tr from-emerald-600 to-teal-500 text-white rounded-2xl p-3.5 shadow-md border border-emerald-400/20 text-left relative overflow-hidden cursor-pointer hover:shadow-lg active:scale-[0.99] transition"
+      >
         <div className="absolute right-0 bottom-0 w-24 h-24 bg-white/5 rounded-full filter blur-xl"></div>
         <div className="flex justify-between items-start">
           <div className="space-y-1.5 max-w-[70%]">
@@ -68,15 +77,14 @@ export const HomeTab: React.FC<HomeTabProps> = ({ setActiveTab, setSportFilter, 
             <h3 className="text-xs font-black text-white leading-tight">SportRes AI đang trực tuyến!</h3>
             <p className="text-[9.5px] text-white/90 leading-tight">Đề xuất sân trống Thạch Thất hôm nay & ghép kèo phù hợp với trình của bạn.</p>
           </div>
-          <button
-            onClick={onOpenAi}
-            className="bg-white text-emerald-800 px-3 py-1.5 rounded-xl text-[10px] font-black shadow-md hover:bg-neutral-100 transition flex items-center gap-1 cursor-pointer shrink-0"
+          <span
+            className="bg-white text-emerald-800 px-3 py-1.5 rounded-xl text-[10px] font-black shadow-md flex items-center gap-1 shrink-0"
           >
             <Sparkles size={11} className="text-emerald-600 animate-pulse" />
             Hỏi AI
-          </button>
+          </span>
         </div>
-      </div>
+      </button>
 
       {/* 3. Deep court deals section (Ưu đãi sân bóng) */}
       <div className="bg-white rounded-2xl border border-neutral-200/60 p-4 shadow-md space-y-3.5 text-left">
@@ -96,6 +104,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({ setActiveTab, setSportFilter, 
         {/* Responsive Grid Container (3-column layout) */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 pr-1">
           {courts.slice(0, 3).map((court, index) => {
+            const cardImage = getVenueCardImage(court);
             const discountPercent = index % 3 === 0 ? 40 : index % 3 === 1 ? 25 : 15;
             const originalPriceDecimal = court.priceMin / (1 - discountPercent / 100);
             const originalPrice = Math.ceil(originalPriceDecimal / 10000) * 10000;
@@ -108,7 +117,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({ setActiveTab, setSportFilter, 
               >
                 <div className="relative h-36 w-full overflow-hidden">
                   <SafeImage
-                    src={court.imageUrl}
+                    src={cardImage}
                     fallbackSrc="https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&q=80&w=800"
                     sportType={court.sport}
                     alt={court.name}

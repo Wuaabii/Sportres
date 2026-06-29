@@ -3,6 +3,7 @@ import process from 'node:process';
 import readline from 'node:readline/promises';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
+import { createDatabasePoolConfig } from '../database-config.js';
 
 const { Pool } = pg;
 const DRY_RUN = process.argv.includes('--dry-run');
@@ -49,7 +50,7 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool(createDatabasePoolConfig());
 const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
 
 async function main() {

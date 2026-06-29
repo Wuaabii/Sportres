@@ -2,6 +2,7 @@ import 'dotenv/config';
 import process from 'node:process';
 import readline from 'node:readline/promises';
 import pg from 'pg';
+import { createDatabasePoolConfig } from '../database-config.js';
 
 const { Pool } = pg;
 const DRY_RUN = process.argv.includes('--dry-run');
@@ -15,7 +16,7 @@ if (!process.env.DATABASE_URL) {
   process.exit(1);
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool(createDatabasePoolConfig());
 const normalizeName = (value: unknown) =>
   String(value || '').normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('vi-VN');
 const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;

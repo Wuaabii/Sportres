@@ -8,6 +8,80 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// database-config.ts
+import { readFileSync } from "node:fs";
+var CERT_VERIFYING_SSL_MODES, TLS_REQUIRING_SSL_MODES, getDatabaseUrl, parseDatabaseUrl, getSslMode, readSslFile, removeSslSearchParams, createDatabaseSslConfig, createDatabasePoolConfig;
+var init_database_config = __esm({
+  "database-config.ts"() {
+    CERT_VERIFYING_SSL_MODES = /* @__PURE__ */ new Set(["verify-ca", "verify-full"]);
+    TLS_REQUIRING_SSL_MODES = /* @__PURE__ */ new Set(["allow", "prefer", "require", "no-verify"]);
+    getDatabaseUrl = (connectionString) => connectionString || process.env.DATABASE_URL;
+    parseDatabaseUrl = (connectionString) => {
+      const databaseUrl = getDatabaseUrl(connectionString);
+      if (!databaseUrl) return null;
+      try {
+        return new URL(databaseUrl);
+      } catch {
+        return null;
+      }
+    };
+    getSslMode = (databaseUrl) => (databaseUrl?.searchParams.get("sslmode") || process.env.PGSSLMODE || "").toLowerCase();
+    readSslFile = (path2, label) => {
+      if (!path2) return void 0;
+      try {
+        return readFileSync(path2, "utf8");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[SportRes DB] Could not read ${label} file at ${path2}: ${message}`);
+        return void 0;
+      }
+    };
+    removeSslSearchParams = (connectionString) => {
+      const databaseUrl = parseDatabaseUrl(connectionString);
+      if (!databaseUrl) return getDatabaseUrl(connectionString);
+      databaseUrl.searchParams.delete("sslmode");
+      databaseUrl.searchParams.delete("sslcert");
+      databaseUrl.searchParams.delete("sslkey");
+      databaseUrl.searchParams.delete("sslrootcert");
+      return databaseUrl.toString();
+    };
+    createDatabaseSslConfig = (connectionString) => {
+      const databaseUrl = parseDatabaseUrl(connectionString);
+      const sslmode = getSslMode(databaseUrl);
+      const servername = databaseUrl?.hostname;
+      const ca = readSslFile(databaseUrl?.searchParams.get("sslrootcert") || process.env.PGSSLROOTCERT, "sslrootcert");
+      const cert = readSslFile(databaseUrl?.searchParams.get("sslcert") || process.env.PGSSLCERT, "sslcert");
+      const key = readSslFile(databaseUrl?.searchParams.get("sslkey") || process.env.PGSSLKEY, "sslkey");
+      const certificateOptions = {
+        ...ca ? { ca } : {},
+        ...cert ? { cert } : {},
+        ...key ? { key } : {}
+      };
+      if (CERT_VERIFYING_SSL_MODES.has(sslmode) || ca) {
+        return {
+          rejectUnauthorized: true,
+          ...servername ? { servername } : {},
+          ...certificateOptions
+        };
+      }
+      if (sslmode === "disable") {
+        console.warn("[SportRes DB] Ignoring sslmode=disable because SSL is required for the configured database connection.");
+      } else if (sslmode && !TLS_REQUIRING_SSL_MODES.has(sslmode)) {
+        console.warn(`[SportRes DB] Unrecognized sslmode=${sslmode}; using encrypted PostgreSQL connection.`);
+      }
+      return {
+        rejectUnauthorized: false,
+        ...servername ? { servername } : {},
+        ...certificateOptions
+      };
+    };
+    createDatabasePoolConfig = (connectionString) => ({
+      connectionString: removeSslSearchParams(connectionString),
+      ssl: createDatabaseSslConfig(connectionString)
+    });
+  }
+});
+
 // database.ts
 var database_exports = {};
 __export(database_exports, {
@@ -18,13 +92,12 @@ import pg from "pg";
 var Pool, pool, query;
 var init_database = __esm({
   "database.ts"() {
+    init_database_config();
     ({ Pool } = pg);
     if (!process.env.DATABASE_URL) {
       console.warn("[SportRes DB] DATABASE_URL is not set. Database API routes will fail until it is configured.");
     }
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL
-    });
+    pool = new Pool(createDatabasePoolConfig());
     query = (text, params) => pool.query(text, params);
   }
 });
@@ -37,6 +110,9 @@ import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomUUID } from "crypto";
+import multer from "multer";
+import { createClient } from "@supabase/supabase-js";
+import OpenAI from "openai";
 
 // src/api/assistant.ts
 import { GoogleGenAI } from "@google/genai";
@@ -163,6 +239,47 @@ var PAYMENT_BANK_INFO = {
   accountHolder: "Nguyen Minh Quan",
   qrImageUrl: "https://img.vietqr.io/image/MB-3386558805-compact.png"
 };
+var inferSupabaseUrlFromDatabaseUrl = () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) return "";
+  try {
+    const parsed = new URL(databaseUrl);
+    const usernameProjectRef = parsed.username.match(/^postgres\.([a-z0-9]{20})$/i)?.[1];
+    const hostProjectRef = parsed.hostname.match(/^db\.([a-z0-9]{20})\.supabase\.co$/i)?.[1];
+    const projectRef = usernameProjectRef || hostProjectRef;
+    return projectRef ? `https://${projectRef}.supabase.co` : "";
+  } catch {
+    return "";
+  }
+};
+var SUPABASE_URL = (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, "");
+var SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || "";
+var SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "media";
+var IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024;
+var SUPPORTED_IMAGE_EXTENSIONS = /* @__PURE__ */ new Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif", "heic", "heif"]);
+var SUPPORTED_IMAGE_MIME_EXTENSIONS = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/bmp": "bmp",
+  "image/x-ms-bmp": "bmp",
+  "image/avif": "avif",
+  "image/heic": "heic",
+  "image/heif": "heif"
+};
+var getStorageConfigError = () => {
+  const missing = [];
+  if (!SUPABASE_URL) missing.push("SUPABASE_URL");
+  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!missing.length) return null;
+  return "Supabase Storage ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh. Vui l\xF2ng thi\u1EBFt l\u1EADp SUPABASE_URL v\xE0 SUPABASE_SERVICE_ROLE_KEY.";
+};
+var storageConfigError = getStorageConfigError();
+if (storageConfigError) {
+  console.warn(`[SportRes Storage] ${storageConfigError}`);
+}
 var bookingCodeFromId = (bookingId) => `SPORTRES_${bookingId.replaceAll("-", "").slice(0, 12).toUpperCase()}`;
 var DEMO_PASSWORDS = {
   owner1: "Owner@123",
@@ -189,6 +306,70 @@ async function ensureUserSchema() {
     await query2("ALTER TABLE users ALTER COLUMN phone SET NOT NULL");
   })();
   await userSchemaReady;
+}
+var imageSchemaReady = null;
+async function ensureImageSchema() {
+  imageSchemaReady ||= (async () => {
+    await query2("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT");
+    await query2("ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS owner_cover_url TEXT");
+    await query2("ALTER TABLE courts ADD COLUMN IF NOT EXISTS image_url TEXT");
+    await query2("ALTER TABLE courts ADD COLUMN IF NOT EXISTS address TEXT");
+    await query2("ALTER TABLE courts ADD COLUMN IF NOT EXISTS latitude double precision");
+    await query2("ALTER TABLE courts ADD COLUMN IF NOT EXISTS longitude double precision");
+  })();
+  await imageSchemaReady;
+}
+var normalizeVietnameseAddress = (value) => {
+  const normalized = String(value || "").normalize("NFC").replace(/\s+/g, " ").replace(/\s*,\s*/g, ", ").replace(/,+/g, ",").trim().replace(/^,\s*|,\s*$/g, "");
+  if (!normalized) return "";
+  const lower = normalized.toLocaleLowerCase("vi-VN");
+  return lower.includes("vi\u1EC7t nam") || lower.includes("vietnam") ? normalized : `${normalized}, Vi\u1EC7t Nam`;
+};
+var GEOCODING_WARNING_MESSAGE = "Kh\xF4ng th\u1EC3 x\xE1c \u0111\u1ECBnh v\u1ECB tr\xED t\u1EEB \u0111\u1ECBa ch\u1EC9 n\xE0y. Vui l\xF2ng nh\u1EADp \u0111\u1ECBa ch\u1EC9 chi ti\u1EBFt h\u01A1n.";
+var parseCoordinate = (value, min, max) => {
+  if (value === void 0 || value === null || value === "") return void 0;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= min && numeric <= max ? numeric : void 0;
+};
+var resolveCourtCoordinates = async (address) => {
+  const normalizedAddress = normalizeVietnameseAddress(address);
+  if (!normalizedAddress) return { latitude: void 0, longitude: void 0, source: "missing" };
+  try {
+    const params = new URLSearchParams({
+      q: normalizedAddress,
+      format: "jsonv2",
+      limit: "1",
+      addressdetails: "1"
+    });
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+      headers: {
+        "Accept": "application/json",
+        "Accept-Language": "vi,en",
+        "User-Agent": "SportRes/1.0 local-development"
+      }
+    });
+    if (!response.ok) throw new Error(`Nominatim returned ${response.status}`);
+    const results = await response.json();
+    const first = results[0];
+    const geocodedLatitude = parseCoordinate(first?.lat, -90, 90);
+    const geocodedLongitude = parseCoordinate(first?.lon, -180, 180);
+    if (geocodedLatitude === void 0 || geocodedLongitude === void 0) {
+      console.warn("[SportRes geocoding] No coordinates found for address:", normalizedAddress);
+      return { latitude: void 0, longitude: void 0, source: "not_found" };
+    }
+    return { latitude: geocodedLatitude, longitude: geocodedLongitude, source: "geocoded" };
+  } catch (error) {
+    console.warn("[SportRes geocoding] Failed to geocode address:", normalizedAddress, error?.message || error);
+    return { latitude: void 0, longitude: void 0, source: "failed" };
+  }
+};
+var notificationSchemaReady = null;
+async function ensureNotificationSchema() {
+  notificationSchemaReady ||= (async () => {
+    await query2("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS event_key VARCHAR(255)");
+    await query2("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_event_key ON notifications(event_key)");
+  })();
+  await notificationSchemaReady;
 }
 var adminVenueOwnerSchemaReady = null;
 async function ensureAdminVenueOwnerSchema() {
@@ -228,6 +409,87 @@ app.use("/api/owner", (req, res, next) => {
   });
   next();
 });
+var supabaseAdmin = null;
+var mediaBucketReady = null;
+var getSupabaseAdmin = () => {
+  if (storageConfigError) throw new Error(storageConfigError);
+  supabaseAdmin ||= createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+  return supabaseAdmin;
+};
+var ensureMediaBucket = async () => {
+  mediaBucketReady ||= (async () => {
+    const { error } = await getSupabaseAdmin().storage.getBucket(SUPABASE_STORAGE_BUCKET);
+    if (!error) return;
+    if (error.message.toLowerCase().includes("not found")) {
+      throw new Error("Bucket l\u01B0u \u1EA3nh ch\u01B0a t\u1ED3n t\u1EA1i. Vui l\xF2ng t\u1EA1o bucket media trong Supabase Storage.");
+    }
+    throw new Error(error.message);
+  })();
+  await mediaBucketReady;
+};
+var normalizeImageExtension = (extension) => extension.toLowerCase().replace(/^\./, "") === "jpeg" ? "jpg" : extension.toLowerCase().replace(/^\./, "");
+var extensionForOriginalName = (originalName) => {
+  const match = originalName?.toLowerCase().match(/\.([a-z0-9]+)$/);
+  if (!match) return "";
+  const extension = normalizeImageExtension(match[1]);
+  return SUPPORTED_IMAGE_EXTENSIONS.has(extension) ? extension : "";
+};
+var extensionForMimeType = (mimeType = "") => {
+  const normalizedMime = mimeType.toLowerCase().split(";")[0].trim();
+  if (SUPPORTED_IMAGE_MIME_EXTENSIONS[normalizedMime]) return SUPPORTED_IMAGE_MIME_EXTENSIONS[normalizedMime];
+  if (!normalizedMime.startsWith("image/")) return "";
+  const subtype = normalizeImageExtension(normalizedMime.split("/")[1] || "");
+  return subtype && /^[a-z0-9]+$/.test(subtype) ? subtype : "";
+};
+var resolveImageExtension = (mimeType = "", originalName) => extensionForOriginalName(originalName) || extensionForMimeType(mimeType);
+var isSupportedImageUpload = (mimeType = "", originalName) => Boolean(resolveImageExtension(mimeType, originalName)) || mimeType.toLowerCase().split(";")[0].trim().startsWith("image/");
+var validateImageUpload = (mimeType, size, originalName) => {
+  if (!isSupportedImageUpload(mimeType, originalName)) {
+    throw new Error("File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7.");
+  }
+  if (!size || size > IMAGE_UPLOAD_LIMIT_BYTES) {
+    throw new Error("K\xEDch th\u01B0\u1EDBc \u1EA3nh kh\xF4ng \u0111\u01B0\u1EE3c v\u01B0\u1EE3t qu\xE1 gi\u1EDBi h\u1EA1n cho ph\xE9p.");
+  }
+};
+var uniqueImagePath = (folder, ownerId, mimeType, originalName) => `${folder}/${ownerId}/${Date.now()}-${randomUUID()}.${resolveImageExtension(mimeType, originalName) || "img"}`;
+async function uploadStorageImage(folder, ownerId, buffer, contentType, originalName) {
+  validateImageUpload(contentType, buffer.length, originalName);
+  await ensureMediaBucket();
+  const objectPath = uniqueImagePath(folder, ownerId, contentType, originalName);
+  const { error } = await getSupabaseAdmin().storage.from(SUPABASE_STORAGE_BUCKET).upload(objectPath, buffer, {
+    contentType: contentType || "image/*",
+    upsert: true,
+    cacheControl: "3600"
+  });
+  if (error) throw new Error(error.message);
+  const { data } = getSupabaseAdmin().storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(objectPath);
+  return data.publicUrl;
+}
+var memoryImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: IMAGE_UPLOAD_LIMIT_BYTES, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    if (!isSupportedImageUpload(file.mimetype, file.originalname)) {
+      callback(new Error("File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7."));
+      return;
+    }
+    callback(null, true);
+  }
+}).any();
+var multerImageUpload = (req, res, next) => {
+  memoryImageUpload(req, res, (error) => {
+    if (error) {
+      const message = error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE" ? "K\xEDch th\u01B0\u1EDBc \u1EA3nh kh\xF4ng \u0111\u01B0\u1EE3c v\u01B0\u1EE3t qu\xE1 gi\u1EDBi h\u1EA1n cho ph\xE9p." : error instanceof Error ? error.message : "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7.";
+      return res.status(400).json({ error: message });
+    }
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ error: "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7." });
+    req.file = files[0];
+    next();
+  });
+};
 var tokenFor = (user) => jwt.sign({ id: user.id, role: user.role === "owner" ? "venue_owner" : user.role }, JWT_SECRET, { expiresIn: "7d" });
 var authOptional = (req, _res, next) => {
   const token = req.header("Authorization")?.replace(/^Bearer\s+/i, "");
@@ -250,6 +512,13 @@ var authRequired = (req, res, next) => {
     next();
   });
 };
+var isOwnerRole = (role) => role === "owner" || role === "venue_owner";
+var ownerRoleRequired = (req, res, next) => {
+  if (!isOwnerRole(req.user?.role)) {
+    return res.status(403).json({ error: "B\u1EA1n kh\xF4ng c\xF3 quy\u1EC1n c\u1EADp nh\u1EADt \u1EA3nh b\xECa ch\u1EE7 s\xE2n." });
+  }
+  next();
+};
 var SUPPORTED_SPORTS = ["soccer", "badminton", "tennis", "basketball", "pickleball", "volleyball", "golf"];
 var SUPPORTED_SKILLS = ["Beginner", "Intermediate", "Advanced", "Pro"];
 var toUserProfile = (row, sportSkills = []) => {
@@ -261,7 +530,8 @@ var toUserProfile = (row, sportSkills = []) => {
     id: row.id,
     full_name: row.full_name || row.display_name || row.username || row.phone,
     name: row.full_name || row.display_name || row.username || row.phone,
-    avatar: row.avatar_url || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200",
+    avatar: row.avatar_url || "/sportres-logo.png",
+    ownerCoverUrl: row.owner_cover_url || "",
     phone: row.phone || "",
     role: row.role,
     skillLevels: {
@@ -276,7 +546,7 @@ var toUserProfile = (row, sportSkills = []) => {
 async function userProfileById(userId) {
   await ensureUserSchema();
   const row = (await query2(
-    `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+    `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
      FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
      WHERE u.id = $1`,
     [userId]
@@ -400,7 +670,8 @@ var buildSlotRanges = (openingTime, closingTime, duration) => {
 async function ownerCourt(courtId, user) {
   const role = user.role === "owner" ? "venue_owner" : user.role;
   return (await query2(
-    `SELECT c.*, v.owner_id, v.opening_hour, v.closing_hour
+    `SELECT c.*, v.owner_id, v.opening_hour, v.closing_hour,
+            v.address AS venue_address, v.district AS venue_district, v.city AS venue_city
      FROM courts c JOIN venues v ON v.id = c.venue_id
      WHERE c.id = $1 AND ($2 = 'admin' OR $2 = 'staff' OR v.owner_id = $3)`,
     [courtId, role, user.id]
@@ -518,6 +789,105 @@ function mapBooking(row) {
     reviewPlayers: false,
     participants: []
   };
+}
+var mapNotification = (row) => ({
+  id: row.id,
+  type: row.type,
+  recipientUserId: row.user_id,
+  referenceId: row.reference_id || void 0,
+  title: row.title,
+  body: row.body,
+  isRead: Boolean(row.is_read),
+  createdAt: row.created_at
+});
+async function createNotification(executor, notification) {
+  await ensureNotificationSchema();
+  await executor.query(
+    `INSERT INTO notifications (user_id, type, title, body, reference_id, event_key)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (event_key) DO NOTHING`,
+    [
+      notification.userId,
+      notification.type,
+      notification.title,
+      notification.body,
+      notification.referenceId || null,
+      notification.eventKey || null
+    ]
+  );
+}
+async function notifyBookingEvent(executor, bookingId, event) {
+  const row = (await executor.query(
+    `SELECT b.id, b.user_id, b.booking_code, b.venue_id, b.court_id, b.time_range,
+            v.name AS venue_name, v.owner_id, c.name AS court_name
+     FROM bookings b
+     JOIN venues v ON v.id = b.venue_id
+     JOIN courts c ON c.id = b.court_id
+     WHERE b.id = $1`,
+    [bookingId]
+  )).rows[0];
+  if (!row) return;
+  const label = row.booking_code || bookingCodeFromId(String(row.id));
+  const courtName = row.venue_name || row.court_name || "s\xE2n";
+  const messages = {
+    created: { title: "\u0110\u1EB7t s\xE2n th\xE0nh c\xF4ng", body: `B\u1EA1n \u0111\xE3 \u0111\u1EB7t s\xE2n ${courtName} th\xE0nh c\xF4ng.` },
+    pending_payment: { title: "Booking \u0111ang ch\u1EDD thanh to\xE1n", body: `Thanh to\xE1n cho booking #${label} \u0111ang ch\u1EDD x\xE1c nh\u1EADn.` },
+    transfer_submitted: { title: "\u0110\xE3 ghi nh\u1EADn thanh to\xE1n", body: `Thanh to\xE1n cho booking #${label} \u0111ang ch\u1EDD qu\u1EA3n tr\u1ECB vi\xEAn x\xE1c nh\u1EADn.` },
+    payment_approved: { title: "Thanh to\xE1n \u0111\xE3 x\xE1c nh\u1EADn", body: `Thanh to\xE1n booking #${label} \u0111\xE3 \u0111\u01B0\u1EE3c x\xE1c nh\u1EADn.` },
+    confirmed: { title: "Booking \u0111\xE3 x\xE1c nh\u1EADn", body: `Booking #${label} \u0111\xE3 \u0111\u01B0\u1EE3c x\xE1c nh\u1EADn.` },
+    payment_rejected: { title: "Thanh to\xE1n b\u1ECB t\u1EEB ch\u1ED1i", body: `Thanh to\xE1n booking #${label} \u0111\xE3 b\u1ECB t\u1EEB ch\u1ED1i.` },
+    cancelled: { title: "Booking \u0111\xE3 h\u1EE7y", body: `Booking #${label} \u0111\xE3 \u0111\u01B0\u1EE3c h\u1EE7y.` },
+    completed: { title: "Booking ho\xE0n th\xE0nh", body: `Booking #${label} \u0111\xE3 ho\xE0n th\xE0nh.` }
+  };
+  const message = messages[event];
+  await createNotification(executor, {
+    userId: row.user_id,
+    type: "booking",
+    title: message.title,
+    body: message.body,
+    referenceId: row.id,
+    eventKey: `booking:${row.id}:${event}`
+  });
+  if (["created", "transfer_submitted", "confirmed", "cancelled", "completed"].includes(event)) {
+    await createNotification(executor, {
+      userId: row.owner_id,
+      type: "booking",
+      title: message.title,
+      body: `Booking #${label} t\u1EA1i ${courtName}: ${message.body}`,
+      referenceId: row.id,
+      eventKey: `booking:${row.id}:${event}:owner`
+    });
+  }
+}
+async function notifyMatchEvent(executor, matchId, event, actorId) {
+  const row = (await executor.query(
+    `SELECT m.id, m.creator_id, m.title, m.status, u.full_name AS actor_name
+     FROM matches m
+     LEFT JOIN users u ON u.id = $2
+     WHERE m.id = $1`,
+    [matchId, actorId || null]
+  )).rows[0];
+  if (!row) return;
+  const actorName = row.actor_name || "Ng\u01B0\u1EDDi ch\u01A1i";
+  const messages = {
+    created: { title: "T\u1EA1o tr\u1EADn \u0111\u1EA5u m\u1EDBi", body: `B\u1EA1n \u0111\xE3 t\u1EA1o tr\u1EADn \u0111\u1EA5u ${row.title}.` },
+    joined: { title: "C\xF3 ng\u01B0\u1EDDi tham gia tr\u1EADn \u0111\u1EA5u", body: `${actorName} \u0111\xE3 tham gia tr\u1EADn \u0111\u1EA5u c\u1EE7a b\u1EA1n.` },
+    left: { title: "C\xF3 ng\u01B0\u1EDDi r\u1EDDi tr\u1EADn \u0111\u1EA5u", body: `${actorName} \u0111\xE3 r\u1EDDi tr\u1EADn \u0111\u1EA5u ${row.title}.` },
+    full: { title: "Tr\u1EADn \u0111\u1EA5u \u0111\xE3 \u0111\u1EE7 ng\u01B0\u1EDDi", body: `Tr\u1EADn \u0111\u1EA5u ${row.title} \u0111\xE3 \u0111\u1EE7 ng\u01B0\u1EDDi tham gia.` },
+    started: { title: "Tr\u1EADn \u0111\u1EA5u b\u1EAFt \u0111\u1EA7u", body: `Tr\u1EADn \u0111\u1EA5u ${row.title} \u0111\xE3 b\u1EAFt \u0111\u1EA7u.` },
+    ended: { title: "Tr\u1EADn \u0111\u1EA5u \u0111\xE3 k\u1EBFt th\xFAc", body: "Tr\u1EADn \u0111\u1EA5u \u0111\xE3 k\u1EBFt th\xFAc. H\xE3y \u0111\xE1nh gi\xE1 s\xE2n v\xE0 ng\u01B0\u1EDDi ch\u01A1i." },
+    completed: { title: "Tr\u1EADn \u0111\u1EA5u ho\xE0n th\xE0nh", body: `Tr\u1EADn \u0111\u1EA5u ${row.title} \u0111\xE3 ho\xE0n th\xE0nh.` },
+    review: { title: "C\xF3 \u0111\xE1nh gi\xE1 m\u1EDBi", body: `Tr\u1EADn \u0111\u1EA5u ${row.title} c\xF3 \u0111\xE1nh gi\xE1 m\u1EDBi sau tr\u1EADn.` }
+  };
+  const message = messages[event];
+  await createNotification(executor, {
+    userId: row.creator_id,
+    type: "match",
+    title: message.title,
+    body: message.body,
+    referenceId: row.id,
+    eventKey: `match:${row.id}:${event}${actorId ? `:${actorId}` : ""}`
+  });
 }
 async function bookingRows(where = "", params = []) {
   await ensureBookingPaymentSchema();
@@ -666,7 +1036,7 @@ app.post("/api/auth/login", async (req, res) => {
     if (!phone || !password) return res.status(400).json({ error: "S\u1ED1 \u0111i\u1EC7n tho\u1EA1i v\xE0 m\u1EADt kh\u1EA9u l\xE0 b\u1EAFt bu\u1ED9c." });
     if (!isValidPhone(phone)) return res.status(400).json({ error: "S\u1ED1 \u0111i\u1EC7n tho\u1EA1i kh\xF4ng h\u1EE3p l\u1EC7." });
     const row = (await query2(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
        WHERE u.phone = $1`,
       [phone]
@@ -681,10 +1051,76 @@ app.post("/api/auth/login", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+var saveUserAvatarUrl = async (userId, avatarUrl) => {
+  await query2(
+    `INSERT INTO user_profiles (user_id, display_name, avatar_url)
+     SELECT id, full_name, $2 FROM users WHERE id = $1
+     ON CONFLICT (user_id) DO UPDATE
+     SET avatar_url = EXCLUDED.avatar_url,
+         display_name = COALESCE(user_profiles.display_name, EXCLUDED.display_name)`,
+    [userId, avatarUrl]
+  );
+  return userProfileById(userId);
+};
 app.get("/api/me", authRequired, async (req, res) => {
   const user = await userProfileById(req.user.id);
   if (!user) return res.status(404).json({ error: "User not found." });
   res.json({ user });
+});
+app.post("/api/profile/change-password", authRequired, async (req, res) => {
+  try {
+    const currentPassword = typeof req.body.currentPassword === "string" ? req.body.currentPassword : "";
+    const newPassword = typeof req.body.newPassword === "string" ? req.body.newPassword : "";
+    const confirmPassword = typeof req.body.confirmPassword === "string" ? req.body.confirmPassword : "";
+    if (!currentPassword) return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i l\xE0 b\u1EAFt bu\u1ED9c." });
+    if (!newPassword) return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi l\xE0 b\u1EAFt bu\u1ED9c." });
+    if (!confirmPassword) return res.status(400).json({ error: "X\xE1c nh\u1EADn m\u1EADt kh\u1EA9u m\u1EDBi l\xE0 b\u1EAFt bu\u1ED9c." });
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi v\xE0 x\xE1c nh\u1EADn m\u1EADt kh\u1EA9u kh\xF4ng kh\u1EDBp." });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi ph\u1EA3i c\xF3 \xEDt nh\u1EA5t 8 k\xFD t\u1EF1." });
+    }
+    const row = (await query2("SELECT password_hash FROM users WHERE id = $1", [req.user.id])).rows[0];
+    if (!row) return res.status(404).json({ error: "User not found." });
+    const currentPasswordValid = await bcrypt.compare(currentPassword, row.password_hash).catch(() => false);
+    if (!currentPasswordValid) {
+      return res.status(400).json({ error: "M\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i kh\xF4ng \u0111\xFAng." });
+    }
+    const sameAsCurrentPassword = await bcrypt.compare(newPassword, row.password_hash).catch(() => false);
+    if (sameAsCurrentPassword) {
+      return res.status(400).json({ error: "M\u1EADt kh\u1EA9u m\u1EDBi kh\xF4ng \u0111\u01B0\u1EE3c tr\xF9ng v\u1EDBi m\u1EADt kh\u1EA9u hi\u1EC7n t\u1EA1i." });
+    }
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await query2("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [passwordHash, req.user.id]);
+    res.json({ success: true, message: "\u0110\u1ED5i m\u1EADt kh\u1EA9u th\xE0nh c\xF4ng." });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.post("/api/profile/avatar", authRequired, multerImageUpload, async (req, res) => {
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7." });
+    const avatarUrl = await uploadStorageImage("avatars", req.user.id, file.buffer, file.mimetype, file.originalname);
+    const user = await saveUserAvatarUrl(req.user.id, avatarUrl);
+    res.json({ avatar_url: avatarUrl, avatarUrl, user });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Kh\xF4ng th\u1EC3 thay \u1EA3nh. Vui l\xF2ng th\u1EED l\u1EA1i." });
+  }
+});
+app.post("/api/me/avatar", authRequired, multerImageUpload, async (req, res) => {
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7." });
+    const avatarUrl = await uploadStorageImage("avatars", req.user.id, file.buffer, file.mimetype, file.originalname);
+    const user = await saveUserAvatarUrl(req.user.id, avatarUrl);
+    res.json({ avatar_url: avatarUrl, avatarUrl, user });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Kh\xF4ng th\u1EC3 thay \u1EA3nh. Vui l\xF2ng th\u1EED l\u1EA1i." });
+  }
 });
 app.patch("/api/me/profile", authRequired, async (req, res) => {
   const client = await pool2.connect();
@@ -758,7 +1194,7 @@ app.patch("/api/me", authRequired, async (req, res) => {
     );
     await client.query("COMMIT");
     const row = (await query2(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id WHERE u.id = $1`,
       [req.user.id]
     )).rows[0];
@@ -775,12 +1211,68 @@ app.get("/api/admin/users", authRequired, async (req, res) => {
   try {
     await ensureUserSchema();
     const rows = (await query2(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u
        LEFT JOIN user_profiles up ON up.user_id = u.id
        ORDER BY u.created_at DESC`
     )).rows;
     res.json(rows.map(mapAdminUser));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.get("/api/admin/revenue-analytics", authRequired, async (req, res) => {
+  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only." });
+  try {
+    await ensureBookingPaymentSchema();
+    const row = (await query2(
+      `WITH bounds AS (
+         SELECT
+           (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS today,
+           DATE_TRUNC('month', NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS month_start
+       ),
+       days AS (
+         SELECT GENERATE_SERIES(
+           (SELECT today FROM bounds) - INTERVAL '6 days',
+           (SELECT today FROM bounds),
+           INTERVAL '1 day'
+         )::date AS day
+       ),
+       valid_bookings AS (
+         SELECT b.date::date AS booking_date, COALESCE(b.total_price, 0)::bigint AS revenue
+         FROM bookings b
+         WHERE b.status IN ('confirmed', 'completed')
+           AND b.payment_status = 'paid'
+       ),
+       daily AS (
+         SELECT booking_date, SUM(revenue)::bigint AS revenue
+         FROM valid_bookings
+         WHERE booking_date BETWEEN (SELECT today FROM bounds) - INTERVAL '6 days' AND (SELECT today FROM bounds)
+         GROUP BY booking_date
+       )
+       SELECT
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date = (SELECT today FROM bounds)), 0)::bigint AS today_revenue,
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date BETWEEN (SELECT today FROM bounds) - INTERVAL '6 days' AND (SELECT today FROM bounds)), 0)::bigint AS seven_day_revenue,
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date >= (SELECT month_start FROM bounds) AND booking_date < ((SELECT month_start FROM bounds) + INTERVAL '1 month')::date), 0)::bigint AS monthly_revenue,
+         COALESCE(
+           JSON_AGG(
+             JSON_BUILD_OBJECT('date', days.day::text, 'revenue', COALESCE(daily.revenue, 0))
+             ORDER BY days.day
+           ),
+           '[]'::json
+         ) AS daily_revenue_series
+       FROM days
+       LEFT JOIN daily ON daily.booking_date = days.day`
+    )).rows[0];
+    res.json({
+      todayRevenue: Number(row.today_revenue || 0),
+      sevenDayRevenue: Number(row.seven_day_revenue || 0),
+      monthlyRevenue: Number(row.monthly_revenue || 0),
+      dailyRevenueSeries: (row.daily_revenue_series || []).map((item) => ({
+        date: String(item.date),
+        revenue: Number(item.revenue || 0)
+      }))
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -837,7 +1329,7 @@ app.post("/api/admin/venue-owners", authRequired, async (req, res) => {
     )).rows[0];
     await client.query("COMMIT");
     const ownerProfile = (await query2(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
        WHERE u.id = $1`,
       [owner.id]
@@ -864,13 +1356,55 @@ app.post("/api/admin/venue-owners", authRequired, async (req, res) => {
     client.release();
   }
 });
+app.post("/api/owner/cover", authRequired, ownerRoleRequired, multerImageUpload, async (req, res) => {
+  const client = await pool2.connect();
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7." });
+    const ownerCoverUrl = await uploadStorageImage("owner-covers", req.user.id, file.buffer, file.mimetype, file.originalname);
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO user_profiles (user_id, display_name, owner_cover_url)
+       SELECT id, full_name, $2 FROM users WHERE id = $1
+       ON CONFLICT (user_id) DO UPDATE
+       SET owner_cover_url = EXCLUDED.owner_cover_url,
+           display_name = COALESCE(user_profiles.display_name, EXCLUDED.display_name)`,
+      [req.user.id, ownerCoverUrl]
+    );
+    const updatedCourts = await client.query(
+      `UPDATE courts c
+       SET image_url = $1
+       WHERE EXISTS (
+         SELECT 1
+         FROM venues v
+         WHERE v.id = c.venue_id AND v.owner_id = $2
+       )
+       RETURNING c.id`,
+      [ownerCoverUrl, req.user.id]
+    );
+    await client.query("COMMIT");
+    res.json({
+      owner_cover_url: ownerCoverUrl,
+      ownerCoverUrl,
+      imageUrl: ownerCoverUrl,
+      updatedCourtIds: updatedCourts.rows.map((row) => row.id)
+    });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => void 0);
+    res.status(400).json({ error: error.message || "Kh\xF4ng th\u1EC3 thay \u1EA3nh. Vui l\xF2ng th\u1EED l\u1EA1i." });
+  } finally {
+    client.release();
+  }
+});
 app.get("/api/owner/courts", authRequired, async (req, res) => {
   if (!["venue_owner", "admin", "staff"].includes(req.user.role)) {
     return res.status(403).json({ error: "Owner court access required." });
   }
+  await ensureImageSchema();
   const rows = (await query2(
-    `SELECT c.id, c.venue_id, c.name, c.sport, c.status, c.description,
-            c.price_min AS price_per_hour, v.name AS venue_name
+    `SELECT c.id, c.venue_id, c.name, c.sport, c.status, c.description, c.address,
+            c.image_url, c.latitude, c.longitude, c.price_min AS price_per_hour, v.name AS venue_name
      FROM courts c
      JOIN venues v ON v.id = c.venue_id
      WHERE $1::text IN ('admin', 'staff') OR v.owner_id = $2
@@ -885,20 +1419,29 @@ app.get("/api/owner/courts", authRequired, async (req, res) => {
     sport: row.sport,
     status: row.status,
     description: row.description || "",
+    address: row.address || "",
+    imageUrl: row.image_url || "",
+    latitude: row.latitude != null ? Number(row.latitude) : void 0,
+    longitude: row.longitude != null ? Number(row.longitude) : void 0,
     pricePerHour: Number(row.price_per_hour || 0)
   })));
 });
 app.get("/api/courts", authOptional, async (req, res) => {
   try {
+    await ensureImageSchema();
     const rows = (await query2(
-      `SELECT v.*, c.id AS court_id, c.name AS court_name, c.sport, c.price_min, c.price_peak, c.status AS court_status,
-              c.description AS court_description,
+      `SELECT v.*, up.owner_cover_url,
+              c.id AS court_id, c.name AS court_name, c.address AS court_address,
+              c.sport, c.price_min, c.price_peak, c.status AS court_status,
+              c.description AS court_description, c.image_url AS court_image_url,
+              c.latitude AS court_latitude, c.longitude AS court_longitude,
               cs.opening_time AS schedule_opening_time, cs.closing_time AS schedule_closing_time,
               cs.slot_duration AS schedule_slot_duration,
               ts.id AS slot_id, ts.date, ts.date::text AS slot_date, ts.start_time, ts.end_time,
               COALESCE(NULLIF(ts.price, 0), c.price_min) AS slot_price,
               ts.is_peak, ts.is_booked, ts.is_blocked, ts.is_maintenance
        FROM venues v
+       LEFT JOIN user_profiles up ON up.user_id = v.owner_id
        LEFT JOIN courts c ON c.venue_id = v.id
        LEFT JOIN court_schedules cs ON cs.court_id = c.id AND cs.date = CURRENT_DATE
        LEFT JOIN time_slots ts ON ts.court_id = c.id AND ts.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '13 days'
@@ -924,20 +1467,24 @@ app.get("/api/courts", authOptional, async (req, res) => {
           ownerId: row.owner_id,
           name: row.name,
           sport: row.sport || row.primary_sport || "all",
-          address: row.address,
+          address: row.court_address || row.address,
           district: row.district || row.city || "",
           rating: Number(row.rating || 0),
           reviewsCount: Number(row.reviews_count || 0),
-          imageUrl: row.image_url || "",
+          imageUrl: row.owner_cover_url || row.image_url || row.court_image_url || "",
+          ownerCoverUrl: row.owner_cover_url || "",
           priceMin: Number(row.price_min || 0),
-          latitude: row.latitude ? Number(row.latitude) : void 0,
-          longitude: row.longitude ? Number(row.longitude) : void 0,
+          latitude: row.court_latitude != null ? Number(row.court_latitude) : row.latitude != null ? Number(row.latitude) : void 0,
+          longitude: row.court_longitude != null ? Number(row.court_longitude) : row.longitude != null ? Number(row.longitude) : void 0,
           description: row.description || "",
           amenities: row.amenities || [],
           subCourts: []
         });
       }
       const venue = venues.get(row.id);
+      if (!venue.address && (row.court_address || row.address)) venue.address = row.court_address || row.address;
+      if (venue.latitude == null && row.court_latitude != null) venue.latitude = Number(row.court_latitude);
+      if (venue.longitude == null && row.court_longitude != null) venue.longitude = Number(row.court_longitude);
       if (!row.court_id) continue;
       let sub = venue.subCourts.find((item) => item.id === row.court_id);
       if (!sub) {
@@ -947,7 +1494,11 @@ app.get("/api/courts", authOptional, async (req, res) => {
           sport: row.sport,
           status: row.court_status,
           pricePerHour: Number(row.price_min || 0),
+          address: row.court_address || row.address,
           description: row.court_description || "",
+          imageUrl: row.court_image_url || "",
+          latitude: row.court_latitude != null ? Number(row.court_latitude) : void 0,
+          longitude: row.court_longitude != null ? Number(row.court_longitude) : void 0,
           openingTime: row.schedule_opening_time ? String(row.schedule_opening_time).slice(0, 5) : "06:00",
           closingTime: row.schedule_closing_time ? String(row.schedule_closing_time).slice(0, 5) : "22:00",
           slotDuration: Number(row.schedule_slot_duration || 60),
@@ -1069,6 +1620,7 @@ app.get("/api/owner/courts/:courtId/time-slots", authRequired, async (req, res) 
 app.get("/api/owner/dashboard-stats", authRequired, async (req, res) => {
   try {
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
     if (!["venue_owner", "admin", "staff"].includes(req.user.role)) {
       return res.status(403).json({ error: "Owner dashboard access required." });
     }
@@ -1238,18 +1790,34 @@ app.patch("/api/owner/time-slots/:slotId", authRequired, async (req, res) => {
 });
 app.post("/api/courts", authRequired, async (req, res) => {
   try {
+    await ensureImageSchema();
     const { venueId, name, sport, capacity, description, status = "open" } = req.body;
     const pricePerHour = Math.max(0, Number(req.body.pricePerHour ?? req.body.priceMin ?? 0));
     if (!String(name || "").trim()) return res.status(400).json({ error: "T\xEAn s\xE2n l\xE0 b\u1EAFt bu\u1ED9c." });
     if (!["open", "closed", "maintenance"].includes(status)) return res.status(400).json({ error: "Tr\u1EA1ng th\xE1i s\xE2n kh\xF4ng h\u1EE3p l\u1EC7." });
     const venue = (await query2("SELECT * FROM venues WHERE id = $1 AND owner_id = $2", [venueId, req.user.id])).rows[0];
     if (!venue && req.user.role !== "admin") return res.status(403).json({ error: "You can only add courts to your own venue." });
+    const courtAddress = String(req.body.address || [venue?.address, venue?.district, venue?.city].filter(Boolean).join(", ")).trim();
+    const coordinates = await resolveCourtCoordinates(courtAddress);
+    const geocodingWarning = coordinates.latitude == null || coordinates.longitude == null ? GEOCODING_WARNING_MESSAGE : void 0;
     const row = (await query2(
-      `INSERT INTO courts (venue_id, name, sport, price_min, price_peak, capacity, description, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [venueId, String(name).trim(), sport, pricePerHour, pricePerHour, capacity || null, description || null, status]
+      `INSERT INTO courts (venue_id, name, sport, price_min, price_peak, capacity, description, status, address, latitude, longitude)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [
+        venueId,
+        String(name).trim(),
+        sport,
+        pricePerHour,
+        pricePerHour,
+        capacity || null,
+        description || null,
+        status,
+        courtAddress || null,
+        coordinates.latitude ?? null,
+        coordinates.longitude ?? null
+      ]
     )).rows[0];
-    res.status(201).json(row);
+    res.status(201).json({ ...row, warning: geocodingWarning });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -1257,6 +1825,7 @@ app.post("/api/courts", authRequired, async (req, res) => {
 app.patch("/api/owner/courts/:courtId", authRequired, async (req, res) => {
   const client = await pool2.connect();
   try {
+    await ensureImageSchema();
     const court = await ownerCourt(req.params.courtId, req.user);
     if (!court) return res.status(403).json({ error: "Court not found or access denied." });
     const name = String(req.body.name || court.name).trim();
@@ -1266,14 +1835,33 @@ app.patch("/api/owner/courts/:courtId", authRequired, async (req, res) => {
     if (!name) return res.status(400).json({ error: "T\xEAn s\xE2n l\xE0 b\u1EAFt bu\u1ED9c." });
     if (!["open", "closed", "maintenance"].includes(status)) return res.status(400).json({ error: "Tr\u1EA1ng th\xE1i s\xE2n kh\xF4ng h\u1EE3p l\u1EC7." });
     const normalizedPrice = Math.max(0, price || 0);
+    const fallbackAddress = [court.venue_address, court.venue_district, court.venue_city].filter(Boolean).join(", ");
+    const currentAddress = String(court.address || fallbackAddress || "").trim();
+    const courtAddress = String(req.body.address ?? currentAddress).trim();
+    const shouldResolveCoordinates = courtAddress !== currentAddress || court.latitude == null || court.longitude == null;
+    const coordinates = shouldResolveCoordinates ? await resolveCourtCoordinates(courtAddress) : {
+      latitude: court.latitude != null ? Number(court.latitude) : void 0,
+      longitude: court.longitude != null ? Number(court.longitude) : void 0
+    };
+    const geocodingWarning = shouldResolveCoordinates && (coordinates.latitude == null || coordinates.longitude == null) ? GEOCODING_WARNING_MESSAGE : void 0;
     await client.query("BEGIN");
     const updated = (await client.query(
       `UPDATE courts
        SET name = $1, sport = $2, status = $3, price_min = $4, price_peak = $4,
-           description = $5
-       WHERE id = $6
+           description = $5, address = $6, latitude = $7, longitude = $8
+       WHERE id = $9
        RETURNING *`,
-      [name, sport, status, normalizedPrice, req.body.description || null, court.id]
+      [
+        name,
+        sport,
+        status,
+        normalizedPrice,
+        req.body.description || null,
+        courtAddress || null,
+        shouldResolveCoordinates ? coordinates.latitude ?? null : court.latitude != null ? Number(court.latitude) : null,
+        shouldResolveCoordinates ? coordinates.longitude ?? null : court.longitude != null ? Number(court.longitude) : null,
+        court.id
+      ]
     )).rows[0];
     await client.query(
       `UPDATE time_slots ts
@@ -1314,12 +1902,29 @@ app.patch("/api/owner/courts/:courtId", authRequired, async (req, res) => {
       );
     }
     await client.query("COMMIT");
-    res.json({ ...updated, pricePerHour: Number(updated.price_min || 0) });
+    res.json({ ...updated, pricePerHour: Number(updated.price_min || 0), warning: geocodingWarning });
   } catch (error) {
     await client.query("ROLLBACK").catch(() => void 0);
     res.status(400).json({ error: error.message });
   } finally {
     client.release();
+  }
+});
+app.post("/api/owner/courts/:courtId/image", authRequired, multerImageUpload, async (req, res) => {
+  try {
+    await ensureImageSchema();
+    const court = await ownerCourt(req.params.courtId, req.user);
+    if (!court) return res.status(403).json({ error: "Court not found or access denied." });
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "File t\u1EA3i l\xEAn ph\u1EA3i l\xE0 \u1EA3nh h\u1EE3p l\u1EC7." });
+    const imageUrl = await uploadStorageImage("courts", `${court.venue_id}/${court.id}`, file.buffer, file.mimetype, file.originalname);
+    const updated = (await query2(
+      "UPDATE courts SET image_url = $1 WHERE id = $2 RETURNING *",
+      [imageUrl, court.id]
+    )).rows[0];
+    res.json({ imageUrl, court: { ...updated, imageUrl, pricePerHour: Number(updated.price_min || 0) } });
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Kh\xF4ng th\u1EC3 thay \u1EA3nh. Vui l\xF2ng th\u1EED l\u1EA1i." });
   }
 });
 app.delete("/api/owner/courts/:courtId", authRequired, async (req, res) => {
@@ -1347,7 +1952,14 @@ app.delete("/api/owner/courts/:courtId", authRequired, async (req, res) => {
   }
 });
 app.get("/api/venues", authOptional, async (_req, res) => {
-  const rows = (await query2("SELECT * FROM venues ORDER BY created_at DESC")).rows;
+  const rows = (await query2(
+    `SELECT v.*,
+            up.owner_cover_url,
+            COALESCE(up.owner_cover_url, v.image_url) AS image_url
+     FROM venues v
+     LEFT JOIN user_profiles up ON up.user_id = v.owner_id
+     ORDER BY v.created_at DESC`
+  )).rows;
   res.json(rows);
 });
 app.post("/api/venues", authRequired, async (req, res) => {
@@ -1399,6 +2011,57 @@ app.get("/api/venue-requests", authOptional, async (req, res) => {
     createdAt: row.created_at,
     reviewedAt: row.reviewed_at
   })));
+});
+app.get("/api/notifications", authRequired, async (req, res) => {
+  try {
+    await ensureNotificationSchema();
+    const rows = (await query2(
+      `SELECT * FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    )).rows;
+    res.json(rows.map(mapNotification));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+app.patch("/api/notifications/:id/read", authRequired, async (req, res) => {
+  try {
+    await ensureNotificationSchema();
+    const row = (await query2(
+      `UPDATE notifications SET is_read = TRUE
+       WHERE id = $1 AND user_id = $2
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    )).rows[0];
+    if (!row) return res.status(404).json({ error: "Notification not found." });
+    res.json(mapNotification(row));
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+app.post("/api/notifications/read-all", authRequired, async (req, res) => {
+  try {
+    await ensureNotificationSchema();
+    await query2("UPDATE notifications SET is_read = TRUE WHERE user_id = $1", [req.user.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+app.delete("/api/notifications/:id", authRequired, async (req, res) => {
+  try {
+    await ensureNotificationSchema();
+    const row = (await query2(
+      "DELETE FROM notifications WHERE id = $1 AND user_id = $2 RETURNING id",
+      [req.params.id, req.user.id]
+    )).rows[0];
+    if (!row) return res.status(404).json({ error: "Notification not found." });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 app.post("/api/venue-requests/:id/approve", authRequired, async (req, res) => {
   const client = await pool2.connect();
@@ -1496,12 +2159,13 @@ app.post("/api/bookings", authRequired, async (req, res) => {
     if (requestedSlotIds.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
       return res.status(400).json({ error: "Khung gi\u1EDD n\xE0y ch\u01B0a \u0111\u01B0\u1EE3c t\u1EA1o trong h\u1EC7 th\u1ED1ng. Vui l\xF2ng th\u1EED l\u1EA1i ho\u1EB7c ch\u1ECDn ng\xE0y kh\xE1c." });
     }
-    await client.query("BEGIN");
     await ensureTimeSlotSchema();
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
     const slots = (await client.query(
       `SELECT ts.*, ts.date::text AS slot_date, c.venue_id, c.status AS court_status,
-              c.price_min, v.status AS venue_status
+              c.price_min, c.name AS court_name, v.name AS venue_name, v.owner_id, v.status AS venue_status
        FROM time_slots ts
        JOIN courts c ON c.id = ts.court_id
        JOIN venues v ON v.id = c.venue_id
@@ -1550,6 +2214,8 @@ app.post("/api/bookings", authRequired, async (req, res) => {
         [bookingId, req.user.id, slot.court_id, slot.venue_id, slot.id, slot.slot_date, timeRange, total, bookingGroupId, bookingCode, bookingCode, `SPORTRES-B-${bookingCode}`, notes || null]
       )).rows[0];
       createdBookingIds.push(booking.id);
+      await notifyBookingEvent(client, booking.id, "created");
+      await notifyBookingEvent(client, booking.id, "pending_payment");
     }
     await client.query("COMMIT");
     const createdBookings = await bookingRows("WHERE b.id = ANY($1::uuid[])", [createdBookingIds]);
@@ -1566,7 +2232,8 @@ app.post("/api/bookings", authRequired, async (req, res) => {
 app.post("/api/bookings/:id/confirm-transfer", authRequired, async (req, res) => {
   try {
     await ensureBookingPaymentSchema();
-    const booking = (await query2(
+    await ensureNotificationSchema();
+    const updated = (await query2(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1 AND user_id = $2
        )
@@ -1576,11 +2243,15 @@ app.post("/api/bookings/:id/confirm-transfer", authRequired, async (req, res) =>
        WHERE user_id = $2
          AND payment_status = 'pending_transfer'
          AND (id = $1 OR booking_group_id = (SELECT booking_group_id FROM target))
-       RETURNING *`,
+       RETURNING id`,
       [req.params.id, req.user.id]
-    )).rows[0];
-    if (!booking) return res.status(409).json({ error: "Booking kh\xF4ng t\u1ED3n t\u1EA1i ho\u1EB7c \u0111\xE3 g\u1EEDi x\xE1c nh\u1EADn chuy\u1EC3n kho\u1EA3n." });
-    res.json({ success: true, booking: mapBooking(booking) });
+    )).rows;
+    if (updated.length === 0) return res.status(409).json({ error: "Booking kh\xF4ng t\u1ED3n t\u1EA1i ho\u1EB7c \u0111\xE3 g\u1EEDi x\xE1c nh\u1EADn chuy\u1EC3n kho\u1EA3n." });
+    for (const booking2 of updated) {
+      await notifyBookingEvent({ query: query2 }, booking2.id, "transfer_submitted");
+    }
+    const booking = (await bookingRows("WHERE b.id = $1", [updated[0].id]))[0];
+    res.json({ success: true, booking });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -1594,11 +2265,21 @@ app.get("/api/admin/bookings/pending-payments", authRequired, async (req, res) =
   }
 });
 app.post("/api/admin/bookings/:id/approve-payment", authRequired, async (req, res) => {
-  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only." });
+  if (!["admin", "venue_owner", "staff"].includes(req.user.role)) return res.status(403).json({ error: "Payment approval access required." });
   const client = await pool2.connect();
   try {
-    await client.query("BEGIN");
+    if (req.user.role !== "admin") {
+      const allowed = (await client.query(
+        `SELECT 1 FROM bookings b
+         JOIN venues v ON v.id = b.venue_id
+         WHERE b.id = $1 AND ($2 = 'staff' OR v.owner_id = $3)`,
+        [req.params.id, req.user.role, req.user.id]
+      )).rows[0];
+      if (!allowed) return res.status(403).json({ error: "Booking not found or access denied." });
+    }
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
     const booking = (await client.query(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1
@@ -1620,6 +2301,8 @@ app.post("/api/admin/bookings/:id/approve-payment", authRequired, async (req, re
          AND (b.id = $1 OR b.booking_group_id = $2)`,
       [booking.id, booking.booking_group_id]
     );
+    await notifyBookingEvent(client, booking.id, "payment_approved");
+    await notifyBookingEvent(client, booking.id, "confirmed");
     await client.query("COMMIT");
     res.json({ success: true });
   } catch (error) {
@@ -1630,11 +2313,21 @@ app.post("/api/admin/bookings/:id/approve-payment", authRequired, async (req, re
   }
 });
 app.post("/api/admin/bookings/:id/reject-payment", authRequired, async (req, res) => {
-  if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only." });
+  if (!["admin", "venue_owner", "staff"].includes(req.user.role)) return res.status(403).json({ error: "Payment approval access required." });
   const client = await pool2.connect();
   try {
-    await client.query("BEGIN");
+    if (req.user.role !== "admin") {
+      const allowed = (await client.query(
+        `SELECT 1 FROM bookings b
+         JOIN venues v ON v.id = b.venue_id
+         WHERE b.id = $1 AND ($2 = 'staff' OR v.owner_id = $3)`,
+        [req.params.id, req.user.role, req.user.id]
+      )).rows[0];
+      if (!allowed) return res.status(403).json({ error: "Booking not found or access denied." });
+    }
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
     const booking = (await client.query(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1
@@ -1656,6 +2349,7 @@ app.post("/api/admin/bookings/:id/reject-payment", authRequired, async (req, res
          AND (b.id = $1 OR b.booking_group_id = $2)`,
       [booking.id, booking.booking_group_id]
     );
+    await notifyBookingEvent(client, booking.id, "payment_rejected");
     await client.query("COMMIT");
     res.json({ success: true });
   } catch (error) {
@@ -1671,6 +2365,7 @@ app.patch("/api/bookings/:id/status", authRequired, async (req, res) => {
     if (!["completed", "cancelled"].includes(status)) {
       return res.status(400).json({ error: "Invalid booking status." });
     }
+    await ensureNotificationSchema();
     const booking = (await query2(
       `UPDATE bookings b
        SET status = $1,
@@ -1694,6 +2389,14 @@ app.patch("/api/bookings/:id/status", authRequired, async (req, res) => {
     if (status === "cancelled") {
       await query2("UPDATE time_slots SET is_booked = FALSE, is_blocked = FALSE, booked_by = NULL WHERE id = $1", [booking.time_slot_id]);
     }
+    await notifyBookingEvent({ query: query2 }, booking.id, status);
+    if (status === "completed") {
+      const linkedMatch = (await query2("SELECT id FROM matches WHERE booking_id = $1", [booking.id])).rows[0];
+      if (linkedMatch) {
+        await notifyMatchEvent({ query: query2 }, linkedMatch.id, "ended", req.user.id);
+        await notifyMatchEvent({ query: query2 }, linkedMatch.id, "review", req.user.id);
+      }
+    }
     res.json({ success: true, booking: mapBooking(booking) });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1710,8 +2413,9 @@ app.post("/api/matches", authRequired, async (req, res) => {
   const client = await pool2.connect();
   try {
     const { title, sport, courtId, bookingId, address, date, time, level, maxPlayers, pricePerPlayer, description } = req.body;
-    await client.query("BEGIN");
     await ensureMatchSchema();
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
     const linkedBooking = bookingId ? (await client.query(
       `SELECT b.*
            FROM bookings b
@@ -1730,6 +2434,7 @@ app.post("/api/matches", authRequired, async (req, res) => {
       [req.user.id, linkedBooking?.id || null, court?.id || null, venue, title, sport, address || null, date, String(time).slice(0, 5), level, maxPlayers || 10, pricePerPlayer || 0, description || null]
     )).rows[0];
     await client.query("INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [match.id, req.user.id]);
+    await notifyMatchEvent(client, match.id, "created", req.user.id);
     await client.query("COMMIT");
     res.status(201).json((await matchRows()).find((item) => item.id === match.id));
   } catch (error) {
@@ -1740,16 +2445,164 @@ app.post("/api/matches", authRequired, async (req, res) => {
   }
 });
 app.post("/api/matches/:id/join", authRequired, async (req, res) => {
+  const client = await pool2.connect();
   try {
-    await query2("INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [req.params.id, req.user.id]);
-    const count = Number((await query2("SELECT COUNT(*) FROM match_participants WHERE match_id = $1", [req.params.id])).rows[0].count);
-    const match = (await query2("SELECT max_players FROM matches WHERE id = $1", [req.params.id])).rows[0];
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
+    const inserted = (await client.query(
+      "INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING match_id",
+      [req.params.id, req.user.id]
+    )).rows[0];
+    const count = Number((await client.query("SELECT COUNT(*) FROM match_participants WHERE match_id = $1", [req.params.id])).rows[0].count);
+    const match = (await client.query("SELECT max_players FROM matches WHERE id = $1", [req.params.id])).rows[0];
+    if (inserted) {
+      await notifyMatchEvent(client, req.params.id, "joined", req.user.id);
+    }
     if (match && count >= Number(match.max_players)) {
-      await query2("UPDATE matches SET status = $1 WHERE id = $2", ["full", req.params.id]);
+      const updated = (await client.query(
+        "UPDATE matches SET status = 'full' WHERE id = $1 AND status <> 'full' RETURNING id",
+        [req.params.id]
+      )).rows[0];
+      if (updated) await notifyMatchEvent(client, req.params.id, "full", req.user.id);
+    }
+    await client.query("COMMIT");
+    res.json({ success: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => void 0);
+    res.status(400).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+app.post("/api/matches/:id/leave", authRequired, async (req, res) => {
+  const client = await pool2.connect();
+  try {
+    await ensureNotificationSchema();
+    await client.query("BEGIN");
+    const removed = (await client.query(
+      "DELETE FROM match_participants WHERE match_id = $1 AND user_id = $2 RETURNING match_id",
+      [req.params.id, req.user.id]
+    )).rows[0];
+    if (removed) {
+      await client.query("UPDATE matches SET status = 'open' WHERE id = $1 AND status = 'full'", [req.params.id]);
+      await notifyMatchEvent(client, req.params.id, "left", req.user.id);
+    }
+    await client.query("COMMIT");
+    res.json({ success: true });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => void 0);
+    res.status(400).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+app.patch("/api/matches/:id/status", authRequired, async (req, res) => {
+  try {
+    const status = String(req.body.status || "");
+    if (!["in_progress", "finished"].includes(status)) {
+      return res.status(400).json({ error: "Invalid match status." });
+    }
+    await ensureNotificationSchema();
+    const match = (await query2(
+      `UPDATE matches
+       SET status = $1
+       WHERE id = $2
+         AND creator_id = $3
+         AND status <> $1
+       RETURNING id`,
+      [status, req.params.id, req.user.id]
+    )).rows[0];
+    if (!match) return res.status(404).json({ error: "Match not found or status unchanged." });
+    await notifyMatchEvent({ query: query2 }, req.params.id, status === "in_progress" ? "started" : "ended", req.user.id);
+    if (status === "finished") {
+      await notifyMatchEvent({ query: query2 }, req.params.id, "completed", req.user.id);
     }
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+var AI_NOT_CONFIGURED_MESSAGE = "AI ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh. Vui l\xF2ng thi\u1EBFt l\u1EADp OPENAI_API_KEY \u1EDF backend.";
+var toAiText = (value, maxLength = 120) => String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+var summarizeAiContext = (appContext) => {
+  const courts = Array.isArray(appContext?.courts) ? appContext.courts : [];
+  const matches = Array.isArray(appContext?.matches) ? appContext.matches : [];
+  const tournaments = Array.isArray(appContext?.tournaments) ? appContext.tournaments : [];
+  const user = appContext?.user && typeof appContext.user === "object" ? appContext.user : {};
+  return JSON.stringify({
+    user: {
+      name: toAiText(user.name, 80),
+      role: toAiText(user.role, 40),
+      favoriteSports: Array.isArray(user.favoriteSports) ? user.favoriteSports.slice(0, 8).map((item) => toAiText(item, 30)) : [],
+      activeArea: toAiText(user.activeArea, 120)
+    },
+    courts: courts.slice(0, 12).map((court) => ({
+      name: toAiText(court.name, 100),
+      sport: toAiText(court.sport, 30),
+      district: toAiText(court.district, 80),
+      address: toAiText(court.address, 180),
+      priceMin: Number(court.priceMin || court.price_per_hour || 0) || void 0,
+      rating: Number(court.rating || 0) || void 0,
+      status: toAiText(court.status, 40)
+    })),
+    matches: matches.slice(0, 12).map((match) => ({
+      title: toAiText(match.title, 120),
+      sport: toAiText(match.sport, 30),
+      courtName: toAiText(match.courtName, 100),
+      date: toAiText(match.date, 40),
+      time: toAiText(match.time, 40),
+      level: toAiText(match.level, 40),
+      status: toAiText(match.status, 40),
+      playerCount: Array.isArray(match.players) ? match.players.length : void 0,
+      maxPlayers: Number(match.maxPlayers || 0) || void 0
+    })),
+    tournaments: tournaments.slice(0, 8).map((tournament) => ({
+      title: toAiText(tournament.title, 120),
+      sport: toAiText(tournament.sport, 30),
+      status: toAiText(tournament.status, 40),
+      prizePool: toAiText(tournament.prizePool, 80)
+    }))
+  });
+};
+var sportResAiSystemPrompt = `
+B\u1EA1n l\xE0 SportRes AI, tr\u1EE3 l\xFD trong \u1EE9ng d\u1EE5ng SportRes.
+- Tr\u1EA3 l\u1EDDi b\u1EB1ng ti\u1EBFng Vi\u1EC7t theo m\u1EB7c \u0111\u1ECBnh, th\xE2n thi\u1EC7n, r\xF5 r\xE0ng, ng\u1EAFn g\u1ECDn.
+- H\u1ED7 tr\u1EE3 ng\u01B0\u1EDDi d\xF9ng v\u1EC1 \u0111\u1EB7t s\xE2n, gh\xE9p k\xE8o/matchmaking, gi\u1EA3i \u0111\u1EA5u, v\xED/thanh to\xE1n, t\xEDnh n\u0103ng ch\u1EE7 s\xE2n, qu\u1EA3n l\xFD s\xE2n v\xE0 c\xE1ch s\u1EED d\u1EE5ng SportRes.
+- Ch\u1EC9 d\xF9ng d\u1EEF li\u1EC7u SportRes \u0111\u01B0\u1EE3c cung c\u1EA5p trong h\u1ED9i tho\u1EA1i ho\u1EB7c ng\u1EEF c\u1EA3nh h\u1EC7 th\u1ED1ng. Kh\xF4ng t\u1EF1 b\u1ECBa t\xEAn s\xE2n, gi\xE1, \u0111\u1ECBa ch\u1EC9, slot tr\u1ED1ng, gi\u1EA3i \u0111\u1EA5u ho\u1EB7c ng\u01B0\u1EDDi ch\u01A1i.
+- N\u1EBFu ng\u01B0\u1EDDi d\xF9ng c\u1EA7n t\xECnh tr\u1EA1ng s\xE2n tr\u1ED1ng theo th\u1EDDi gian th\u1EF1c, h\xE3y gi\u1EA3i th\xEDch r\u1EB1ng tr\u1EE3 l\xFD ch\u1EC9 c\xF3 th\u1EC3 d\xF9ng d\u1EEF li\u1EC7u do SportRes cung c\u1EA5p v\xE0 h\u01B0\u1EDBng d\u1EABn h\u1ECD ki\u1EC3m tra tr\u1EF1c ti\u1EBFp trong m\xE0n h\xECnh \u0111\u1EB7t s\xE2n.
+- Kh\xF4ng y\xEAu c\u1EA7u, hi\u1EC3n th\u1ECB ho\u1EB7c suy \u0111o\xE1n th\xF4ng tin nh\u1EA1y c\u1EA3m nh\u01B0 m\u1EADt kh\u1EA9u, token, kh\xF3a API.
+`.trim();
+app.post("/api/ai/chat", async (req, res) => {
+  try {
+    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+    if (!message) return res.status(400).json({ error: "message is required" });
+    if (message.length > 1e3) return res.status(400).json({ error: "message must be at most 1000 characters" });
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED_MESSAGE });
+    const history = Array.isArray(req.body?.history) ? req.body.history.slice(-8).map((item) => ({
+      role: item?.role === "model" || item?.role === "assistant" ? "assistant" : "user",
+      content: toAiText(item?.text || item?.content, 1e3)
+    })).filter((item) => item.content) : [];
+    const client = new OpenAI({ apiKey });
+    const completion = await client.chat.completions.create({
+      model: process.env.AI_MODEL?.trim() || "gpt-4o-mini",
+      temperature: 0.5,
+      max_tokens: 700,
+      messages: [
+        { role: "system", content: sportResAiSystemPrompt },
+        { role: "system", content: `Ng\u1EEF c\u1EA3nh SportRes hi\u1EC7n c\xF3:
+${summarizeAiContext(req.body?.appContext)}` },
+        ...history,
+        { role: "user", content: message }
+      ]
+    });
+    const reply = completion.choices[0]?.message?.content?.trim() || "Xin l\u1ED7i, t\xF4i ch\u01B0a th\u1EC3 tr\u1EA3 l\u1EDDi l\xFAc n\xE0y. Vui l\xF2ng th\u1EED l\u1EA1i sau.";
+    res.json({ reply });
+  } catch (error) {
+    console.error("[ai:chat] OpenAI request failed:", error?.message || error);
+    res.status(500).json({
+      error: "\u0110\xE3 x\u1EA3y ra l\u1ED7i h\u1EC7 th\u1ED1ng khi li\xEAn h\u1EC7 tr\u1EE3 l\xFD AI."
+    });
   }
 });
 app.post("/api/assistant", async (req, res) => {

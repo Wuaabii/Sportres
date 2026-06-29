@@ -24,7 +24,7 @@ const iconForType = (type: Notification['type']) => {
 };
 
 export const NotificationsOverlay: React.FC<NotificationsOverlayProps> = ({ onClose }) => {
-  const { user, notifications, markNotificationRead, deleteNotification } = useSport();
+  const { user, notifications, markNotificationRead, markAllNotificationsRead, deleteNotification } = useSport();
   const visibleNotifications = notifications.filter(n => {
     if (n.type === 'system') return true;
     if (user.role === 'venue_owner') return n.ownerId === user.id || n.recipientUserId === user.id;
@@ -45,7 +45,7 @@ export const NotificationsOverlay: React.FC<NotificationsOverlayProps> = ({ onCl
           <h2 className="text-xs font-black text-neutral-800 uppercase tracking-widest">Thông báo chính thức</h2>
         </div>
         <button
-          onClick={() => visibleNotifications.forEach(n => markNotificationRead(n.id))}
+          onClick={markAllNotificationsRead}
           className="text-[10px] font-bold text-emerald-600 hover:text-emerald-500 cursor-pointer flex items-center gap-1 bg-white border border-neutral-100 px-2 py-1 rounded-lg shadow-2xs"
         >
           <CheckCircle2 size={11} />

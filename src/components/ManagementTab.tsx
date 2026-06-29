@@ -10,13 +10,21 @@ import {
   Star,
   Trash2,
   TrendingUp,
+  Upload,
   UserRound,
   Wrench,
 } from 'lucide-react';
 import { useSport } from '../context/SportContext';
 import { CourtSchedule, SportType } from '../types';
+import { SafeImage } from './SafeImage';
 
 type ManageTab = 'dashboard' | 'courts' | 'bookings' | 'schedule' | 'customers';
+
+const SUPPORTED_UPLOAD_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif', 'heic', 'heif'];
+const isSupportedImageFile = (file: File) => {
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  return file.type.startsWith('image/') || SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
+};
 
 const formatMoney = (value: number) => `${value.toLocaleString('vi-VN')}đ`;
 
@@ -44,6 +52,8 @@ export const ManagementTab: React.FC = () => {
     updateOwnerSlotStatus,
     createOwnerCourt,
     updateOwnerCourt,
+    uploadOwnerCourtImage,
+    uploadOwnerCoverImage,
     deleteOwnerCourt,
   } = useSport();
 
@@ -55,9 +65,12 @@ export const ManagementTab: React.FC = () => {
   const [showCourtModal, setShowCourtModal] = useState(false);
   const [editingCourtId, setEditingCourtId] = useState<string | null>(null);
   const [courtMessage, setCourtMessage] = useState('');
+  const [imageUploadingCourtId, setImageUploadingCourtId] = useState<string | null>(null);
+  const [ownerCoverUploading, setOwnerCoverUploading] = useState(false);
   const [courtForm, setCourtForm] = useState({
     venueId: '',
     name: '',
+    address: '',
     sport: 'soccer' as Exclude<SportType, 'all'>,
     pricePerHour: '0',
     status: 'open' as 'open' | 'closed' | 'maintenance',
@@ -86,12 +99,14 @@ export const ManagementTab: React.FC = () => {
 
   const openCourtModal = (venueId?: string, courtId?: string) => {
     const existing = courtId ? allPhysicalCourts.find(item => item.court.id === courtId) : undefined;
+    const defaultVenue = existing?.venue || manageableCourts.find(court => court.id === venueId) || manageableCourts[0];
     setEditingCourtId(courtId || null);
     setCourtMessage('');
     setCourtForm({
-      venueId: existing?.venue.id || venueId || manageableCourts[0]?.id || '',
+      venueId: defaultVenue?.id || '',
       name: existing?.court.name || '',
-      sport: (existing?.court.sport || existing?.venue.sport || 'soccer') as Exclude<SportType, 'all'>,
+      address: existing?.court.address || defaultVenue?.address || '',
+      sport: (existing?.court.sport || defaultVenue?.sport || 'soccer') as Exclude<SportType, 'all'>,
       pricePerHour: String(existing?.court.pricePerHour || 0),
       status: existing?.court.status || 'open',
       description: existing?.court.description || '',
@@ -105,6 +120,7 @@ export const ManagementTab: React.FC = () => {
     try {
       const payload = {
         name: courtForm.name.trim(),
+        address: courtForm.address.trim(),
         sport: courtForm.sport,
         pricePerHour: Number(courtForm.pricePerHour) || 0,
         status: courtForm.status,
@@ -116,6 +132,42 @@ export const ManagementTab: React.FC = () => {
       setCourtMessage(editingCourtId ? 'Đã cập nhật thông tin và giá sân.' : 'Đã tạo sân mới.');
     } catch (error: any) {
       setCourtMessage(error.message || 'Không thể lưu sân.');
+    }
+  };
+
+  const uploadCourtImage = async (courtId: string, file?: File) => {
+    if (!file) return;
+    if (!isSupportedImageFile(file)) {
+      setCourtMessage('File tải lên phải là ảnh hợp lệ.');
+      return;
+    }
+    setCourtMessage('');
+    setImageUploadingCourtId(courtId);
+    try {
+      await uploadOwnerCourtImage(courtId, file);
+      setCourtMessage('Đã cập nhật ảnh sân.');
+    } catch (error: any) {
+      setCourtMessage(error.message || 'Không thể upload ảnh sân.');
+    } finally {
+      setImageUploadingCourtId(null);
+    }
+  };
+
+  const uploadOwnerCover = async (file?: File) => {
+    if (!file) return;
+    if (!isSupportedImageFile(file)) {
+      setCourtMessage('File tải lên phải là ảnh hợp lệ.');
+      return;
+    }
+    setCourtMessage('');
+    setOwnerCoverUploading(true);
+    try {
+      await uploadOwnerCoverImage(file);
+      setCourtMessage('Đã cập nhật ảnh nền chủ sân.');
+    } catch (error: any) {
+      setCourtMessage(error.message || 'Không thể upload ảnh nền chủ sân.');
+    } finally {
+      setOwnerCoverUploading(false);
     }
   };
 
@@ -392,9 +444,26 @@ export const ManagementTab: React.FC = () => {
                   <h3 className="text-sm font-black text-neutral-800 uppercase">Quản lý sân</h3>
                   <p className="text-[9px] text-neutral-400 font-semibold">Tạo và quản lý từng sân thuộc cơ sở.</p>
                 </div>
-                <button onClick={() => openCourtModal()} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 text-white text-[10px] font-black uppercase">
-                  <Plus size={14} /> Thêm sân
-                </button>
+                <div className="flex items-center gap-2">
+                  <label className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[10px] font-black uppercase cursor-pointer ${
+                    ownerCoverUploading ? 'bg-neutral-100 text-neutral-400 pointer-events-none' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                  }`}>
+                    <Upload size={14} /> {ownerCoverUploading ? 'Đang upload...' : 'Thay đổi ảnh nền'}
+                    <input
+                      type="file"
+                      accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.heic,.heif"
+                      className="hidden"
+                      disabled={ownerCoverUploading}
+                      onChange={event => {
+                        void uploadOwnerCover(event.target.files?.[0]);
+                        event.currentTarget.value = '';
+                      }}
+                    />
+                  </label>
+                  <button onClick={() => openCourtModal()} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600 text-white text-[10px] font-black uppercase">
+                    <Plus size={14} /> Thêm sân
+                  </button>
+                </div>
               </div>
               {allPhysicalCourts.length === 0 ? (
                 <div className="bg-white rounded-2xl border border-dashed border-neutral-200 p-8 text-center">
@@ -406,6 +475,30 @@ export const ManagementTab: React.FC = () => {
                 const bookingsToday = manageableBookings.filter(booking => booking.subCourtId === court.id && booking.date === today).length;
                 return (
                   <div key={court.id} className="bg-white rounded-2xl border border-neutral-100 p-4 shadow-sm space-y-3">
+                    <div className="relative h-28 overflow-hidden rounded-xl bg-neutral-100">
+                      <SafeImage
+                        src={court.imageUrl}
+                        sportType={court.sport}
+                        alt={court.name}
+                        className="w-full h-full object-cover"
+                      />
+                      <label className={`absolute right-2 bottom-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] font-black uppercase cursor-pointer shadow-sm ${
+                        imageUploadingCourtId === court.id ? 'bg-white/85 text-neutral-400 pointer-events-none' : 'bg-white text-emerald-700 hover:bg-emerald-50'
+                      }`}>
+                        <Upload size={12} />
+                        {imageUploadingCourtId === court.id ? 'Đang upload...' : 'Đổi ảnh sân'}
+                        <input
+                          type="file"
+                          accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.heic,.heif"
+                          className="hidden"
+                          disabled={imageUploadingCourtId === court.id}
+                          onChange={event => {
+                            void uploadCourtImage(court.id, event.target.files?.[0]);
+                            event.currentTarget.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-[9px] text-emerald-600 font-black uppercase">{venue.name}</p>
@@ -506,69 +599,9 @@ export const ManagementTab: React.FC = () => {
             <div className="bg-white rounded-2xl border border-neutral-100 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-black text-neutral-800 uppercase">Chỉnh sửa lịch sân</h3>
-                  <p className="text-[9px] text-neutral-400 font-bold mt-0.5">Thiết lập giờ hoạt động và trạng thái từng khung giờ.</p>
+                  <h3 className="text-sm font-black text-neutral-800 uppercase">Lịch sân</h3>
+                  <p className="text-[9px] text-neutral-400 font-semibold">Cấu hình lịch và khung giờ cho từng sân.</p>
                 </div>
-                <Calendar size={18} className="text-emerald-500" />
-              </div>
-
-              <label className="text-[9px] font-black uppercase text-neutral-400">
-                Cụm sân
-                <select
-                  value={selectedCourt.id}
-                  onChange={(e) => {
-                    const court = manageableCourts.find(c => c.id === e.target.value);
-                    setSelectedCourtId(e.target.value);
-                    setSelectedSubCourtId(court?.subCourts[0]?.id || '');
-                  }}
-                  className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-bold text-neutral-700"
-                >
-                  {manageableCourts.map(court => <option key={court.id} value={court.id}>{court.name}</option>)}
-                </select>
-              </label>
-
-              <div className="grid grid-cols-2 gap-2">
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Sân
-                  <select value={selectedSubCourt.id} onChange={(e) => setSelectedSubCourtId(e.target.value)} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-bold text-neutral-700">
-                    {selectedCourt.subCourts.map(sub => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
-                  </select>
-                </label>
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Ngày
-                  <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-bold text-neutral-700" />
-                </label>
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Giờ mở cửa
-                  <input type="time" value={scheduleForm.openingTime} onChange={e => setScheduleForm(prev => ({ ...prev, openingTime: e.target.value }))} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-bold text-neutral-700" />
-                </label>
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Giờ đóng cửa
-                  <input type="time" value={scheduleForm.closingTime} onChange={e => setScheduleForm(prev => ({ ...prev, closingTime: e.target.value }))} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2 text-xs font-bold text-neutral-700" />
-                </label>
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Thời lượng
-                  <select value={scheduleForm.slotDuration} onChange={e => setScheduleForm(prev => ({ ...prev, slotDuration: Number(e.target.value) as 30 | 60 | 90 | 120 }))} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-bold text-neutral-700">
-                    {[30, 60, 90, 120].map(duration => <option key={duration} value={duration}>{duration} phút</option>)}
-                  </select>
-                </label>
-                <label className="text-[9px] font-black uppercase text-neutral-400">
-                  Trạng thái sân
-                  <select value={scheduleForm.status} onChange={e => setScheduleForm(prev => ({ ...prev, status: e.target.value as CourtSchedule['status'] }))} className="mt-1 w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-bold text-neutral-700">
-                    <option value="open">Open</option>
-                    <option value="closed">Closed</option>
-                    <option value="maintenance">Maintenance</option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button disabled={scheduleLoading} onClick={() => persistSchedule(false)} className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-neutral-900 text-white text-[9px] font-black uppercase disabled:opacity-50">
-                  <Save size={13} /> Save Schedule
-                </button>
-                <button disabled={scheduleLoading} onClick={() => persistSchedule(true)} className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-emerald-600 text-white text-[9px] font-black uppercase disabled:opacity-50">
-                  <Plus size={13} /> Generate Slots
-                </button>
               </div>
               {scheduleMessage && <p className="text-[10px] font-bold text-center text-emerald-600">{scheduleMessage}</p>}
             </div>
@@ -715,11 +748,23 @@ export const ManagementTab: React.FC = () => {
               <button onClick={() => setShowCourtModal(false)} className="w-8 h-8 rounded-lg bg-neutral-100 text-neutral-500 font-black">×</button>
             </div>
             {!editingCourtId && (
-              <select value={courtForm.venueId} onChange={e => setCourtForm(prev => ({ ...prev, venueId: e.target.value }))} className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold">
+              <select value={courtForm.venueId} onChange={e => {
+                const venue = manageableCourts.find(court => court.id === e.target.value);
+                setCourtForm(prev => ({ ...prev, venueId: e.target.value, address: venue?.address || prev.address }));
+              }} className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold">
                 {manageableCourts.map(venue => <option key={venue.id} value={venue.id}>{venue.name}</option>)}
               </select>
             )}
             <input value={courtForm.name} onChange={e => setCourtForm(prev => ({ ...prev, name: e.target.value }))} placeholder="Tên sân, ví dụ: Sân 1" className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold" />
+            <input
+              value={courtForm.address}
+              onChange={e => setCourtForm(prev => ({ ...prev, address: e.target.value }))}
+              placeholder="Địa chỉ sân, ví dụ: Xóm Chùa 2, Yên Xuân, Thạch Thất, Hà Nội"
+              className="w-full bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold"
+            />
+            <p className="text-[10px] font-semibold text-neutral-500">
+              Hệ thống sẽ tự xác định vị trí sân trên bản đồ từ địa chỉ bạn nhập.
+            </p>
             <div className="grid grid-cols-2 gap-2">
               <select value={courtForm.sport} onChange={e => setCourtForm(prev => ({ ...prev, sport: e.target.value as Exclude<SportType, 'all'> }))} className="bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold">
                 {SPORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -732,6 +777,9 @@ export const ManagementTab: React.FC = () => {
               <option value="maintenance">Bảo trì</option>
             </select>
             <textarea value={courtForm.description} onChange={e => setCourtForm(prev => ({ ...prev, description: e.target.value }))} placeholder="Mô tả (tùy chọn)" className="w-full min-h-20 resize-none bg-neutral-50 border border-neutral-200 rounded-xl px-3 py-2.5 text-xs font-semibold" />
+            {false && <p className="text-[10px] font-semibold text-neutral-500">
+              Hệ thống sẽ tự xác định vị trí sân trên bản đồ từ địa chỉ bạn nhập.
+            </p>}
             {courtMessage && <p className="text-[10px] font-bold text-red-600 bg-red-50 rounded-xl p-3">{courtMessage}</p>}
             <button onClick={saveCourt} className="w-full py-3 rounded-xl bg-emerald-600 text-white text-[10px] font-black uppercase">
               {editingCourtId ? 'Lưu thay đổi' : 'Tạo sân'}

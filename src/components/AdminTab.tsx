@@ -9,7 +9,7 @@ import { SafeImage } from './SafeImage';
 import { SportType } from '../types';
 
 export const AdminTab: React.FC = () => {
-  const { courts, bookings, matches, tournaments, demoUsers, venueRequests, approveVenueRequest, rejectVenueRequestSubmission, approveBookingPayment, rejectBookingPayment, createVenueOwner } = useSport();
+  const { courts, bookings, matches, tournaments, demoUsers, venueRequests, adminRevenueAnalytics, approveVenueRequest, rejectVenueRequestSubmission, approveBookingPayment, rejectBookingPayment, createVenueOwner } = useSport();
   const [activeSubTab, setActiveSubTab] = useState<'overview' | 'payments' | 'users' | 'venues' | 'requests' | 'analytics'>('overview');
   const [searchQuery, setSearchQuery] = useState('');
   const [rejectionReasonById, setRejectionReasonById] = useState<Record<string, string>>({});
@@ -72,7 +72,9 @@ export const AdminTab: React.FC = () => {
   const confirmedBookings = bookings.filter(b => b.status === 'confirmed').length;
   const completedBookings = bookings.filter(b => b.status === 'completed').length;
   const cancelledBookings = bookings.filter(b => b.status === 'cancelled').length;
-  const totalRevenue = bookings.filter(b => b.paymentStatus === 'paid' && ['confirmed', 'completed'].includes(b.status)).reduce((sum, b) => sum + b.price, 0);
+  const totalRevenue = bookings
+    .filter(b => b.paymentStatus === 'paid' && ['confirmed', 'completed'].includes(b.status))
+    .reduce((sum, b) => sum + b.price, 0);
   const pendingPayments = Array.from(
     bookings
       .filter(booking => booking.paymentStatus === 'waiting_admin_confirmation')
@@ -94,6 +96,9 @@ export const AdminTab: React.FC = () => {
   const openMatches = matches.filter(m => m.status === 'open').length;
   const totalTournaments = tournaments.length;
   const pendingVenueRequests = venueRequests.filter(request => request.status === 'pending');
+  const todayRevenue = adminRevenueAnalytics.todayRevenue;
+  const sevenDayRevenue = adminRevenueAnalytics.sevenDayRevenue;
+  const monthlyRevenue = adminRevenueAnalytics.monthlyRevenue;
 
   // Filtered users for search
   const filteredUsers = demoUsers.filter(u =>
@@ -502,15 +507,15 @@ export const AdminTab: React.FC = () => {
               <div className="grid grid-cols-3 gap-2">
                 <div className="text-center p-3 bg-neutral-50 rounded-xl border border-neutral-100">
                   <p className="text-[8px] font-black text-neutral-400 uppercase mb-1">Hôm nay</p>
-                  <p className="text-sm font-black text-neutral-800">{(totalRevenue * 0.15).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ</p>
+                  <p className="text-sm font-black text-neutral-800">{todayRevenue.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ</p>
                 </div>
                 <div className="text-center p-3 bg-neutral-50 rounded-xl border border-neutral-100">
-                  <p className="text-[8px] font-black text-neutral-400 uppercase mb-1">Tuần này</p>
-                  <p className="text-sm font-black text-neutral-800">{(totalRevenue * 0.6).toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ</p>
+                  <p className="text-[8px] font-black text-neutral-400 uppercase mb-1">7 ngày</p>
+                  <p className="text-sm font-black text-neutral-800">{sevenDayRevenue.toLocaleString('vi-VN', { maximumFractionDigits: 0 })}đ</p>
                 </div>
                 <div className="text-center p-3 bg-neutral-50 rounded-xl border border-neutral-100">
                   <p className="text-[8px] font-black text-neutral-400 uppercase mb-1">Tháng này</p>
-                  <p className="text-sm font-black text-emerald-600">{totalRevenue.toLocaleString('vi-VN')}đ</p>
+                  <p className="text-sm font-black text-emerald-600">{monthlyRevenue.toLocaleString('vi-VN')}đ</p>
                 </div>
               </div>
             </div>

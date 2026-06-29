@@ -5,12 +5,16 @@ import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
+import multer from 'multer';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import OpenAI from 'openai';
 import { handleAssistantRequest } from './src/api/assistant.js';
 
 dotenv.config();
 const { query, pool } = await import('./database.js');
 
 type AuthRequest = express.Request & { user?: { id: string; role: string } };
+type UploadFolder = 'avatars' | 'owner-covers' | 'courts' | 'tournaments' | 'events';
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -24,6 +28,63 @@ const PAYMENT_BANK_INFO = {
   accountHolder: 'Nguyen Minh Quan',
   qrImageUrl: 'https://img.vietqr.io/image/MB-3386558805-compact.png',
 } as const;
+const inferSupabaseUrlFromDatabaseUrl = () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) return '';
+
+  try {
+    const parsed = new URL(databaseUrl);
+    const usernameProjectRef = parsed.username.match(/^postgres\.([a-z0-9]{20})$/i)?.[1];
+    const hostProjectRef = parsed.hostname.match(/^db\.([a-z0-9]{20})\.supabase\.co$/i)?.[1];
+    const projectRef = usernameProjectRef || hostProjectRef;
+    return projectRef ? `https://${projectRef}.supabase.co` : '';
+  } catch {
+    return '';
+  }
+};
+
+const SUPABASE_URL = (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
+const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'media';
+const IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024;
+const SUPPORTED_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif', 'heic', 'heif']);
+const SUPPORTED_IMAGE_MIME_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+  'image/x-ms-bmp': 'bmp',
+  'image/avif': 'avif',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+};
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+  'image/x-ms-bmp': 'bmp',
+  'image/avif': 'avif',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+};
+
+const getStorageConfigError = () => {
+  const missing: string[] = [];
+  if (!SUPABASE_URL) missing.push('SUPABASE_URL');
+  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!missing.length) return null;
+  return 'Supabase Storage chưa được cấu hình. Vui lòng thiết lập SUPABASE_URL và SUPABASE_SERVICE_ROLE_KEY.';
+};
+
+const storageConfigError = getStorageConfigError();
+if (storageConfigError) {
+  console.warn(`[SportRes Storage] ${storageConfigError}`);
+}
 
 const bookingCodeFromId = (bookingId: string) =>
   `SPORTRES_${bookingId.replaceAll('-', '').slice(0, 12).toUpperCase()}`;
@@ -54,6 +115,85 @@ async function ensureUserSchema() {
     await query('ALTER TABLE users ALTER COLUMN phone SET NOT NULL');
   })();
   await userSchemaReady;
+}
+
+let imageSchemaReady: Promise<void> | null = null;
+async function ensureImageSchema() {
+  imageSchemaReady ||= (async () => {
+    await query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT');
+    await query('ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS owner_cover_url TEXT');
+    await query('ALTER TABLE courts ADD COLUMN IF NOT EXISTS image_url TEXT');
+    await query('ALTER TABLE courts ADD COLUMN IF NOT EXISTS address TEXT');
+    await query('ALTER TABLE courts ADD COLUMN IF NOT EXISTS latitude double precision');
+    await query('ALTER TABLE courts ADD COLUMN IF NOT EXISTS longitude double precision');
+  })();
+  await imageSchemaReady;
+}
+
+const normalizeVietnameseAddress = (value?: string | null) => {
+  const normalized = String(value || '')
+    .normalize('NFC')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/,+/g, ',')
+    .trim()
+    .replace(/^,\s*|,\s*$/g, '');
+  if (!normalized) return '';
+  const lower = normalized.toLocaleLowerCase('vi-VN');
+  return lower.includes('việt nam') || lower.includes('vietnam')
+    ? normalized
+    : `${normalized}, Việt Nam`;
+};
+
+const GEOCODING_WARNING_MESSAGE = 'Không thể xác định vị trí từ địa chỉ này. Vui lòng nhập địa chỉ chi tiết hơn.';
+
+const parseCoordinate = (value: unknown, min: number, max: number) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= min && numeric <= max ? numeric : undefined;
+};
+
+const resolveCourtCoordinates = async (address?: string | null) => {
+  const normalizedAddress = normalizeVietnameseAddress(address);
+  if (!normalizedAddress) return { latitude: undefined, longitude: undefined, source: 'missing' as const };
+
+  try {
+    const params = new URLSearchParams({
+      q: normalizedAddress,
+      format: 'jsonv2',
+      limit: '1',
+      addressdetails: '1',
+    });
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+      headers: {
+        'Accept': 'application/json',
+        'Accept-Language': 'vi,en',
+        'User-Agent': 'SportRes/1.0 local-development',
+      },
+    });
+    if (!response.ok) throw new Error(`Nominatim returned ${response.status}`);
+    const results = await response.json() as Array<{ lat?: string; lon?: string }>;
+    const first = results[0];
+    const geocodedLatitude = parseCoordinate(first?.lat, -90, 90);
+    const geocodedLongitude = parseCoordinate(first?.lon, -180, 180);
+    if (geocodedLatitude === undefined || geocodedLongitude === undefined) {
+      console.warn('[SportRes geocoding] No coordinates found for address:', normalizedAddress);
+      return { latitude: undefined, longitude: undefined, source: 'not_found' as const };
+    }
+    return { latitude: geocodedLatitude, longitude: geocodedLongitude, source: 'geocoded' as const };
+  } catch (error: any) {
+    console.warn('[SportRes geocoding] Failed to geocode address:', normalizedAddress, error?.message || error);
+    return { latitude: undefined, longitude: undefined, source: 'failed' as const };
+  }
+};
+
+let notificationSchemaReady: Promise<void> | null = null;
+async function ensureNotificationSchema() {
+  notificationSchemaReady ||= (async () => {
+    await query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS event_key VARCHAR(255)');
+    await query('CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_event_key ON notifications(event_key)');
+  })();
+  await notificationSchemaReady;
 }
 
 let adminVenueOwnerSchemaReady: Promise<void> | null = null;
@@ -99,6 +239,119 @@ app.use('/api/owner', (req: AuthRequest, res, next) => {
   next();
 });
 
+let supabaseAdmin: SupabaseClient | null = null;
+let mediaBucketReady: Promise<void> | null = null;
+
+const getSupabaseAdmin = () => {
+  if (storageConfigError) throw new Error(storageConfigError);
+  supabaseAdmin ||= createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  return supabaseAdmin;
+};
+
+const ensureMediaBucket = async () => {
+  mediaBucketReady ||= (async () => {
+    const { error } = await getSupabaseAdmin().storage.getBucket(SUPABASE_STORAGE_BUCKET);
+    if (!error) return;
+    if (error.message.toLowerCase().includes('not found')) {
+      throw new Error('Bucket lưu ảnh chưa tồn tại. Vui lòng tạo bucket media trong Supabase Storage.');
+    }
+    throw new Error(error.message);
+  })();
+  await mediaBucketReady;
+};
+
+const normalizeImageExtension = (extension: string) =>
+  extension.toLowerCase().replace(/^\./, '') === 'jpeg'
+    ? 'jpg'
+    : extension.toLowerCase().replace(/^\./, '');
+
+const extensionForOriginalName = (originalName?: string) => {
+  const match = originalName?.toLowerCase().match(/\.([a-z0-9]+)$/);
+  if (!match) return '';
+  const extension = normalizeImageExtension(match[1]);
+  return SUPPORTED_IMAGE_EXTENSIONS.has(extension) ? extension : '';
+};
+
+const extensionForMimeType = (mimeType = '') => {
+  const normalizedMime = mimeType.toLowerCase().split(';')[0].trim();
+  if (SUPPORTED_IMAGE_MIME_EXTENSIONS[normalizedMime]) return SUPPORTED_IMAGE_MIME_EXTENSIONS[normalizedMime];
+  if (!normalizedMime.startsWith('image/')) return '';
+  const subtype = normalizeImageExtension(normalizedMime.split('/')[1] || '');
+  return subtype && /^[a-z0-9]+$/.test(subtype) ? subtype : '';
+};
+
+const resolveImageExtension = (mimeType = '', originalName?: string) =>
+  extensionForOriginalName(originalName) || extensionForMimeType(mimeType);
+
+const isSupportedImageUpload = (mimeType = '', originalName?: string) =>
+  Boolean(resolveImageExtension(mimeType, originalName))
+  || mimeType.toLowerCase().split(';')[0].trim().startsWith('image/');
+
+const validateImageUpload = (mimeType: string, size: number, originalName?: string) => {
+  if (!isSupportedImageUpload(mimeType, originalName)) {
+    throw new Error('File tải lên phải là ảnh hợp lệ.');
+  }
+  if (!size || size > IMAGE_UPLOAD_LIMIT_BYTES) {
+    throw new Error('Kích thước ảnh không được vượt quá giới hạn cho phép.');
+  }
+};
+
+const uniqueImagePath = (folder: UploadFolder, ownerId: string, mimeType: string, originalName?: string) =>
+  `${folder}/${ownerId}/${Date.now()}-${randomUUID()}.${resolveImageExtension(mimeType, originalName) || 'img'}`;
+
+async function uploadStorageImage(folder: UploadFolder, ownerId: string, buffer: Buffer, contentType: string, originalName?: string) {
+  validateImageUpload(contentType, buffer.length, originalName);
+  await ensureMediaBucket();
+
+  const objectPath = uniqueImagePath(folder, ownerId, contentType, originalName);
+  const { error } = await getSupabaseAdmin()
+    .storage
+    .from(SUPABASE_STORAGE_BUCKET)
+    .upload(objectPath, buffer, {
+      contentType: contentType || 'image/*',
+      upsert: true,
+      cacheControl: '3600',
+    });
+  if (error) throw new Error(error.message);
+
+  const { data } = getSupabaseAdmin()
+    .storage
+    .from(SUPABASE_STORAGE_BUCKET)
+    .getPublicUrl(objectPath);
+  return data.publicUrl;
+}
+
+const memoryImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: IMAGE_UPLOAD_LIMIT_BYTES, files: 1 },
+  fileFilter: (_req, file, callback) => {
+    if (!isSupportedImageUpload(file.mimetype, file.originalname)) {
+      callback(new Error('File tải lên phải là ảnh hợp lệ.'));
+      return;
+    }
+    callback(null, true);
+  },
+}).any();
+
+const multerImageUpload = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
+  memoryImageUpload(req, res, error => {
+    if (error) {
+      const message = error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE'
+        ? 'Kích thước ảnh không được vượt quá giới hạn cho phép.'
+        : error instanceof Error
+          ? error.message
+          : 'File tải lên phải là ảnh hợp lệ.';
+      return res.status(400).json({ error: message });
+    }
+
+    const files = (req.files || []) as Express.Multer.File[];
+    if (!files.length) return res.status(400).json({ error: 'File tải lên phải là ảnh hợp lệ.' });
+    req.file = files[0];
+    next();
+  });
+};
 const tokenFor = (user: { id: string; role: string }) =>
   jwt.sign({ id: user.id, role: user.role === 'owner' ? 'venue_owner' : user.role }, JWT_SECRET, { expiresIn: '7d' });
 
@@ -125,6 +378,15 @@ const authRequired = (req: AuthRequest, res: express.Response, next: express.Nex
   });
 };
 
+const isOwnerRole = (role?: string) => role === 'owner' || role === 'venue_owner';
+
+const ownerRoleRequired = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
+  if (!isOwnerRole(req.user?.role)) {
+    return res.status(403).json({ error: 'Bạn không có quyền cập nhật ảnh bìa chủ sân.' });
+  }
+  next();
+};
+
 const SUPPORTED_SPORTS = ['soccer', 'badminton', 'tennis', 'basketball', 'pickleball', 'volleyball', 'golf'] as const;
 const SUPPORTED_SKILLS = ['Beginner', 'Intermediate', 'Advanced', 'Pro'] as const;
 
@@ -137,7 +399,8 @@ const toUserProfile = (row: any, sportSkills: any[] = []) => {
   id: row.id,
   full_name: row.full_name || row.display_name || row.username || row.phone,
   name: row.full_name || row.display_name || row.username || row.phone,
-  avatar: row.avatar_url || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=200',
+  avatar: row.avatar_url || '/sportres-logo.png',
+  ownerCoverUrl: row.owner_cover_url || '',
   phone: row.phone || '',
   role: row.role,
   skillLevels: {
@@ -153,7 +416,7 @@ const toUserProfile = (row: any, sportSkills: any[] = []) => {
 async function userProfileById(userId: string) {
   await ensureUserSchema();
   const row = (await query(
-    `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+    `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
      FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
      WHERE u.id = $1`,
     [userId],
@@ -309,7 +572,8 @@ const buildSlotRanges = (openingTime: string, closingTime: string, duration: num
 async function ownerCourt(courtId: string, user: { id: string; role: string }) {
   const role = user.role === 'owner' ? 'venue_owner' : user.role;
   return (await query(
-    `SELECT c.*, v.owner_id, v.opening_hour, v.closing_hour
+    `SELECT c.*, v.owner_id, v.opening_hour, v.closing_hour,
+            v.address AS venue_address, v.district AS venue_district, v.city AS venue_city
      FROM courts c JOIN venues v ON v.id = c.venue_id
      WHERE c.id = $1 AND ($2 = 'admin' OR $2 = 'staff' OR v.owner_id = $3)`,
     [courtId, role, user.id],
@@ -441,6 +705,128 @@ function mapBooking(row: any) {
     reviewPlayers: false,
     participants: [],
   };
+}
+
+const mapNotification = (row: any) => ({
+  id: row.id,
+  type: row.type,
+  recipientUserId: row.user_id,
+  referenceId: row.reference_id || undefined,
+  title: row.title,
+  body: row.body,
+  isRead: Boolean(row.is_read),
+  createdAt: row.created_at,
+});
+
+async function createNotification(
+  executor: { query: (text: string, params?: any[]) => Promise<any> },
+  notification: {
+    userId: string;
+    type: 'booking' | 'match' | 'tournament' | 'message' | 'system' | 'promotion';
+    title: string;
+    body: string;
+    referenceId?: string | null;
+    eventKey?: string | null;
+  },
+) {
+  await ensureNotificationSchema();
+  await executor.query(
+    `INSERT INTO notifications (user_id, type, title, body, reference_id, event_key)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (event_key) DO NOTHING`,
+    [
+      notification.userId,
+      notification.type,
+      notification.title,
+      notification.body,
+      notification.referenceId || null,
+      notification.eventKey || null,
+    ],
+  );
+}
+
+async function notifyBookingEvent(
+  executor: { query: (text: string, params?: any[]) => Promise<any> },
+  bookingId: string,
+  event: 'created' | 'pending_payment' | 'transfer_submitted' | 'payment_approved' | 'confirmed' | 'payment_rejected' | 'cancelled' | 'completed',
+) {
+  const row = (await executor.query(
+    `SELECT b.id, b.user_id, b.booking_code, b.venue_id, b.court_id, b.time_range,
+            v.name AS venue_name, v.owner_id, c.name AS court_name
+     FROM bookings b
+     JOIN venues v ON v.id = b.venue_id
+     JOIN courts c ON c.id = b.court_id
+     WHERE b.id = $1`,
+    [bookingId],
+  )).rows[0];
+  if (!row) return;
+  const label = row.booking_code || bookingCodeFromId(String(row.id));
+  const courtName = row.venue_name || row.court_name || 'sân';
+  const messages: Record<typeof event, { title: string; body: string }> = {
+    created: { title: 'Đặt sân thành công', body: `Bạn đã đặt sân ${courtName} thành công.` },
+    pending_payment: { title: 'Booking đang chờ thanh toán', body: `Thanh toán cho booking #${label} đang chờ xác nhận.` },
+    transfer_submitted: { title: 'Đã ghi nhận thanh toán', body: `Thanh toán cho booking #${label} đang chờ quản trị viên xác nhận.` },
+    payment_approved: { title: 'Thanh toán đã xác nhận', body: `Thanh toán booking #${label} đã được xác nhận.` },
+    confirmed: { title: 'Booking đã xác nhận', body: `Booking #${label} đã được xác nhận.` },
+    payment_rejected: { title: 'Thanh toán bị từ chối', body: `Thanh toán booking #${label} đã bị từ chối.` },
+    cancelled: { title: 'Booking đã hủy', body: `Booking #${label} đã được hủy.` },
+    completed: { title: 'Booking hoàn thành', body: `Booking #${label} đã hoàn thành.` },
+  };
+  const message = messages[event];
+  await createNotification(executor, {
+    userId: row.user_id,
+    type: 'booking',
+    title: message.title,
+    body: message.body,
+    referenceId: row.id,
+    eventKey: `booking:${row.id}:${event}`,
+  });
+  if (['created', 'transfer_submitted', 'confirmed', 'cancelled', 'completed'].includes(event)) {
+    await createNotification(executor, {
+      userId: row.owner_id,
+      type: 'booking',
+      title: message.title,
+      body: `Booking #${label} tại ${courtName}: ${message.body}`,
+      referenceId: row.id,
+      eventKey: `booking:${row.id}:${event}:owner`,
+    });
+  }
+}
+
+async function notifyMatchEvent(
+  executor: { query: (text: string, params?: any[]) => Promise<any> },
+  matchId: string,
+  event: 'created' | 'joined' | 'left' | 'full' | 'started' | 'ended' | 'completed' | 'review',
+  actorId?: string,
+) {
+  const row = (await executor.query(
+    `SELECT m.id, m.creator_id, m.title, m.status, u.full_name AS actor_name
+     FROM matches m
+     LEFT JOIN users u ON u.id = $2
+     WHERE m.id = $1`,
+    [matchId, actorId || null],
+  )).rows[0];
+  if (!row) return;
+  const actorName = row.actor_name || 'Người chơi';
+  const messages: Record<typeof event, { title: string; body: string }> = {
+    created: { title: 'Tạo trận đấu mới', body: `Bạn đã tạo trận đấu ${row.title}.` },
+    joined: { title: 'Có người tham gia trận đấu', body: `${actorName} đã tham gia trận đấu của bạn.` },
+    left: { title: 'Có người rời trận đấu', body: `${actorName} đã rời trận đấu ${row.title}.` },
+    full: { title: 'Trận đấu đã đủ người', body: `Trận đấu ${row.title} đã đủ người tham gia.` },
+    started: { title: 'Trận đấu bắt đầu', body: `Trận đấu ${row.title} đã bắt đầu.` },
+    ended: { title: 'Trận đấu đã kết thúc', body: 'Trận đấu đã kết thúc. Hãy đánh giá sân và người chơi.' },
+    completed: { title: 'Trận đấu hoàn thành', body: `Trận đấu ${row.title} đã hoàn thành.` },
+    review: { title: 'Có đánh giá mới', body: `Trận đấu ${row.title} có đánh giá mới sau trận.` },
+  };
+  const message = messages[event];
+  await createNotification(executor, {
+    userId: row.creator_id,
+    type: 'match',
+    title: message.title,
+    body: message.body,
+    referenceId: row.id,
+    eventKey: `match:${row.id}:${event}${actorId ? `:${actorId}` : ''}`,
+  });
 }
 
 async function bookingRows(where = '', params: any[] = []) {
@@ -604,7 +990,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (!phone || !password) return res.status(400).json({ error: 'Số điện thoại và mật khẩu là bắt buộc.' });
     if (!isValidPhone(phone)) return res.status(400).json({ error: 'Số điện thoại không hợp lệ.' });
     const row = (await query(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
        WHERE u.phone = $1`,
       [phone],
@@ -622,13 +1008,86 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+const saveUserAvatarUrl = async (userId: string, avatarUrl: string) => {
+  await query(
+    `INSERT INTO user_profiles (user_id, display_name, avatar_url)
+     SELECT id, full_name, $2 FROM users WHERE id = $1
+     ON CONFLICT (user_id) DO UPDATE
+     SET avatar_url = EXCLUDED.avatar_url,
+         display_name = COALESCE(user_profiles.display_name, EXCLUDED.display_name)`,
+    [userId, avatarUrl],
+  );
+  return userProfileById(userId);
+};
+
 app.get('/api/me', authRequired, async (req: AuthRequest, res) => {
   const user = await userProfileById(req.user!.id);
   if (!user) return res.status(404).json({ error: 'User not found.' });
   res.json({ user });
 });
 
-app.patch('/api/me/profile', authRequired, async (req: AuthRequest, res) => {
+app.post('/api/profile/change-password', authRequired, async (req: AuthRequest, res) => {
+  try {
+    const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
+    const confirmPassword = typeof req.body.confirmPassword === 'string' ? req.body.confirmPassword : '';
+
+    if (!currentPassword) return res.status(400).json({ error: 'Mật khẩu hiện tại là bắt buộc.' });
+    if (!newPassword) return res.status(400).json({ error: 'Mật khẩu mới là bắt buộc.' });
+    if (!confirmPassword) return res.status(400).json({ error: 'Xác nhận mật khẩu mới là bắt buộc.' });
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'Mật khẩu mới và xác nhận mật khẩu không khớp.' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Mật khẩu mới phải có ít nhất 8 ký tự.' });
+    }
+
+    const row = (await query('SELECT password_hash FROM users WHERE id = $1', [req.user!.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'User not found.' });
+
+    const currentPasswordValid = await bcrypt.compare(currentPassword, row.password_hash).catch(() => false);
+    if (!currentPasswordValid) {
+      return res.status(400).json({ error: 'Mật khẩu hiện tại không đúng.' });
+    }
+
+    const sameAsCurrentPassword = await bcrypt.compare(newPassword, row.password_hash).catch(() => false);
+    if (sameAsCurrentPassword) {
+      return res.status(400).json({ error: 'Mật khẩu mới không được trùng với mật khẩu hiện tại.' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, req.user!.id]);
+    res.json({ success: true, message: 'Đổi mật khẩu thành công.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/profile/avatar', authRequired, multerImageUpload, async (req: AuthRequest, res) => {
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'File tải lên phải là ảnh hợp lệ.' });
+    const avatarUrl = await uploadStorageImage('avatars', req.user!.id, file.buffer, file.mimetype, file.originalname);
+    const user = await saveUserAvatarUrl(req.user!.id, avatarUrl);
+    res.json({ avatar_url: avatarUrl, avatarUrl, user });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Không thể thay ảnh. Vui lòng thử lại.' });
+  }
+});
+
+app.post('/api/me/avatar', authRequired, multerImageUpload, async (req: AuthRequest, res) => {
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'File tải lên phải là ảnh hợp lệ.' });
+    const avatarUrl = await uploadStorageImage('avatars', req.user!.id, file.buffer, file.mimetype, file.originalname);
+    const user = await saveUserAvatarUrl(req.user!.id, avatarUrl);
+    res.json({ avatar_url: avatarUrl, avatarUrl, user });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Không thể thay ảnh. Vui lòng thử lại.' });
+  }
+});app.patch('/api/me/profile', authRequired, async (req: AuthRequest, res) => {
   const client = await pool.connect();
   try {
     await ensureUserSchema();
@@ -703,7 +1162,7 @@ app.patch('/api/me', authRequired, async (req: AuthRequest, res) => {
     );
     await client.query('COMMIT');
     const row = (await query(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id WHERE u.id = $1`,
       [req.user!.id],
     )).rows[0];
@@ -721,12 +1180,69 @@ app.get('/api/admin/users', authRequired, async (req: AuthRequest, res) => {
   try {
     await ensureUserSchema();
     const rows = (await query(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u
        LEFT JOIN user_profiles up ON up.user_id = u.id
        ORDER BY u.created_at DESC`,
     )).rows;
     res.json(rows.map(mapAdminUser));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/revenue-analytics', authRequired, async (req: AuthRequest, res) => {
+  if (req.user!.role !== 'admin') return res.status(403).json({ error: 'Admin only.' });
+  try {
+    await ensureBookingPaymentSchema();
+    const row = (await query(
+      `WITH bounds AS (
+         SELECT
+           (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS today,
+           DATE_TRUNC('month', NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date AS month_start
+       ),
+       days AS (
+         SELECT GENERATE_SERIES(
+           (SELECT today FROM bounds) - INTERVAL '6 days',
+           (SELECT today FROM bounds),
+           INTERVAL '1 day'
+         )::date AS day
+       ),
+       valid_bookings AS (
+         SELECT b.date::date AS booking_date, COALESCE(b.total_price, 0)::bigint AS revenue
+         FROM bookings b
+         WHERE b.status IN ('confirmed', 'completed')
+           AND b.payment_status = 'paid'
+       ),
+       daily AS (
+         SELECT booking_date, SUM(revenue)::bigint AS revenue
+         FROM valid_bookings
+         WHERE booking_date BETWEEN (SELECT today FROM bounds) - INTERVAL '6 days' AND (SELECT today FROM bounds)
+         GROUP BY booking_date
+       )
+       SELECT
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date = (SELECT today FROM bounds)), 0)::bigint AS today_revenue,
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date BETWEEN (SELECT today FROM bounds) - INTERVAL '6 days' AND (SELECT today FROM bounds)), 0)::bigint AS seven_day_revenue,
+         COALESCE((SELECT SUM(revenue) FROM valid_bookings WHERE booking_date >= (SELECT month_start FROM bounds) AND booking_date < ((SELECT month_start FROM bounds) + INTERVAL '1 month')::date), 0)::bigint AS monthly_revenue,
+         COALESCE(
+           JSON_AGG(
+             JSON_BUILD_OBJECT('date', days.day::text, 'revenue', COALESCE(daily.revenue, 0))
+             ORDER BY days.day
+           ),
+           '[]'::json
+         ) AS daily_revenue_series
+       FROM days
+       LEFT JOIN daily ON daily.booking_date = days.day`,
+    )).rows[0];
+    res.json({
+      todayRevenue: Number(row.today_revenue || 0),
+      sevenDayRevenue: Number(row.seven_day_revenue || 0),
+      monthlyRevenue: Number(row.monthly_revenue || 0),
+      dailyRevenueSeries: (row.daily_revenue_series || []).map((item: any) => ({
+        date: String(item.date),
+        revenue: Number(item.revenue || 0),
+      })),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -788,7 +1304,7 @@ app.post('/api/admin/venue-owners', authRequired, async (req: AuthRequest, res) 
     await client.query('COMMIT');
 
     const ownerProfile = (await query(
-      `SELECT u.*, up.display_name, up.avatar_url, up.gender, up.active_area
+      `SELECT u.*, up.display_name, up.avatar_url, up.owner_cover_url, up.gender, up.active_area
        FROM users u LEFT JOIN user_profiles up ON up.user_id = u.id
        WHERE u.id = $1`,
       [owner.id],
@@ -816,13 +1332,56 @@ app.post('/api/admin/venue-owners', authRequired, async (req: AuthRequest, res) 
   }
 });
 
+app.post('/api/owner/cover', authRequired, ownerRoleRequired, multerImageUpload, async (req: AuthRequest, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureImageSchema();
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'File tải lên phải là ảnh hợp lệ.' });
+
+    const ownerCoverUrl = await uploadStorageImage('owner-covers', req.user!.id, file.buffer, file.mimetype, file.originalname);
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO user_profiles (user_id, display_name, owner_cover_url)
+       SELECT id, full_name, $2 FROM users WHERE id = $1
+       ON CONFLICT (user_id) DO UPDATE
+       SET owner_cover_url = EXCLUDED.owner_cover_url,
+           display_name = COALESCE(user_profiles.display_name, EXCLUDED.display_name)`,
+      [req.user!.id, ownerCoverUrl],
+    );
+    const updatedCourts = await client.query(
+      `UPDATE courts c
+       SET image_url = $1
+       WHERE EXISTS (
+         SELECT 1
+         FROM venues v
+         WHERE v.id = c.venue_id AND v.owner_id = $2
+       )
+       RETURNING c.id`,
+      [ownerCoverUrl, req.user!.id],
+    );
+    await client.query('COMMIT');
+    res.json({
+      owner_cover_url: ownerCoverUrl,
+      ownerCoverUrl,
+      imageUrl: ownerCoverUrl,
+      updatedCourtIds: updatedCourts.rows.map((row: any) => row.id),
+    });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    res.status(400).json({ error: error.message || 'Không thể thay ảnh. Vui lòng thử lại.' });
+  } finally {
+    client.release();
+  }
+});
 app.get('/api/owner/courts', authRequired, async (req: AuthRequest, res) => {
   if (!['venue_owner', 'admin', 'staff'].includes(req.user!.role)) {
     return res.status(403).json({ error: 'Owner court access required.' });
   }
+  await ensureImageSchema();
   const rows = (await query(
-    `SELECT c.id, c.venue_id, c.name, c.sport, c.status, c.description,
-            c.price_min AS price_per_hour, v.name AS venue_name
+    `SELECT c.id, c.venue_id, c.name, c.sport, c.status, c.description, c.address,
+            c.image_url, c.latitude, c.longitude, c.price_min AS price_per_hour, v.name AS venue_name
      FROM courts c
      JOIN venues v ON v.id = c.venue_id
      WHERE $1::text IN ('admin', 'staff') OR v.owner_id = $2
@@ -837,21 +1396,30 @@ app.get('/api/owner/courts', authRequired, async (req: AuthRequest, res) => {
     sport: row.sport,
     status: row.status,
     description: row.description || '',
+    address: row.address || '',
+    imageUrl: row.image_url || '',
+    latitude: row.latitude != null ? Number(row.latitude) : undefined,
+    longitude: row.longitude != null ? Number(row.longitude) : undefined,
     pricePerHour: Number(row.price_per_hour || 0),
   })));
 });
 
 app.get('/api/courts', authOptional, async (req: AuthRequest, res) => {
   try {
+    await ensureImageSchema();
     const rows = (await query(
-      `SELECT v.*, c.id AS court_id, c.name AS court_name, c.sport, c.price_min, c.price_peak, c.status AS court_status,
-              c.description AS court_description,
+      `SELECT v.*, up.owner_cover_url,
+              c.id AS court_id, c.name AS court_name, c.address AS court_address,
+              c.sport, c.price_min, c.price_peak, c.status AS court_status,
+              c.description AS court_description, c.image_url AS court_image_url,
+              c.latitude AS court_latitude, c.longitude AS court_longitude,
               cs.opening_time AS schedule_opening_time, cs.closing_time AS schedule_closing_time,
               cs.slot_duration AS schedule_slot_duration,
               ts.id AS slot_id, ts.date, ts.date::text AS slot_date, ts.start_time, ts.end_time,
               COALESCE(NULLIF(ts.price, 0), c.price_min) AS slot_price,
               ts.is_peak, ts.is_booked, ts.is_blocked, ts.is_maintenance
        FROM venues v
+       LEFT JOIN user_profiles up ON up.user_id = v.owner_id
        LEFT JOIN courts c ON c.venue_id = v.id
        LEFT JOIN court_schedules cs ON cs.court_id = c.id AND cs.date = CURRENT_DATE
        LEFT JOIN time_slots ts ON ts.court_id = c.id AND ts.date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '13 days'
@@ -877,20 +1445,24 @@ app.get('/api/courts', authOptional, async (req: AuthRequest, res) => {
           ownerId: row.owner_id,
           name: row.name,
           sport: row.sport || row.primary_sport || 'all',
-          address: row.address,
+          address: row.court_address || row.address,
           district: row.district || row.city || '',
           rating: Number(row.rating || 0),
           reviewsCount: Number(row.reviews_count || 0),
-          imageUrl: row.image_url || '',
+          imageUrl: row.owner_cover_url || row.image_url || row.court_image_url || '',
+          ownerCoverUrl: row.owner_cover_url || '',
           priceMin: Number(row.price_min || 0),
-          latitude: row.latitude ? Number(row.latitude) : undefined,
-          longitude: row.longitude ? Number(row.longitude) : undefined,
+          latitude: row.court_latitude != null ? Number(row.court_latitude) : row.latitude != null ? Number(row.latitude) : undefined,
+          longitude: row.court_longitude != null ? Number(row.court_longitude) : row.longitude != null ? Number(row.longitude) : undefined,
           description: row.description || '',
           amenities: row.amenities || [],
           subCourts: [],
         });
       }
       const venue = venues.get(row.id);
+      if (!venue.address && (row.court_address || row.address)) venue.address = row.court_address || row.address;
+      if (venue.latitude == null && row.court_latitude != null) venue.latitude = Number(row.court_latitude);
+      if (venue.longitude == null && row.court_longitude != null) venue.longitude = Number(row.court_longitude);
       if (!row.court_id) continue;
       let sub = venue.subCourts.find((item: any) => item.id === row.court_id);
       if (!sub) {
@@ -900,7 +1472,11 @@ app.get('/api/courts', authOptional, async (req: AuthRequest, res) => {
           sport: row.sport,
           status: row.court_status,
           pricePerHour: Number(row.price_min || 0),
+          address: row.court_address || row.address,
           description: row.court_description || '',
+          imageUrl: row.court_image_url || '',
+          latitude: row.court_latitude != null ? Number(row.court_latitude) : undefined,
+          longitude: row.court_longitude != null ? Number(row.court_longitude) : undefined,
           openingTime: row.schedule_opening_time ? String(row.schedule_opening_time).slice(0, 5) : '06:00',
           closingTime: row.schedule_closing_time ? String(row.schedule_closing_time).slice(0, 5) : '22:00',
           slotDuration: Number(row.schedule_slot_duration || 60),
@@ -1030,6 +1606,7 @@ app.get('/api/owner/courts/:courtId/time-slots', authRequired, async (req: AuthR
 app.get('/api/owner/dashboard-stats', authRequired, async (req: AuthRequest, res) => {
   try {
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
     if (!['venue_owner', 'admin', 'staff'].includes(req.user!.role)) {
       return res.status(403).json({ error: 'Owner dashboard access required.' });
     }
@@ -1210,18 +1787,34 @@ app.patch('/api/owner/time-slots/:slotId', authRequired, async (req: AuthRequest
 
 app.post('/api/courts', authRequired, async (req: AuthRequest, res) => {
   try {
+    await ensureImageSchema();
     const { venueId, name, sport, capacity, description, status = 'open' } = req.body;
     const pricePerHour = Math.max(0, Number(req.body.pricePerHour ?? req.body.priceMin ?? 0));
     if (!String(name || '').trim()) return res.status(400).json({ error: 'Tên sân là bắt buộc.' });
     if (!['open', 'closed', 'maintenance'].includes(status)) return res.status(400).json({ error: 'Trạng thái sân không hợp lệ.' });
     const venue = (await query('SELECT * FROM venues WHERE id = $1 AND owner_id = $2', [venueId, req.user!.id])).rows[0];
     if (!venue && req.user!.role !== 'admin') return res.status(403).json({ error: 'You can only add courts to your own venue.' });
+    const courtAddress = String(req.body.address || [venue?.address, venue?.district, venue?.city].filter(Boolean).join(', ')).trim();
+    const coordinates = await resolveCourtCoordinates(courtAddress);
+    const geocodingWarning = coordinates.latitude == null || coordinates.longitude == null ? GEOCODING_WARNING_MESSAGE : undefined;
     const row = (await query(
-      `INSERT INTO courts (venue_id, name, sport, price_min, price_peak, capacity, description, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [venueId, String(name).trim(), sport, pricePerHour, pricePerHour, capacity || null, description || null, status],
+      `INSERT INTO courts (venue_id, name, sport, price_min, price_peak, capacity, description, status, address, latitude, longitude)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [
+        venueId,
+        String(name).trim(),
+        sport,
+        pricePerHour,
+        pricePerHour,
+        capacity || null,
+        description || null,
+        status,
+        courtAddress || null,
+        coordinates.latitude ?? null,
+        coordinates.longitude ?? null,
+      ],
     )).rows[0];
-    res.status(201).json(row);
+    res.status(201).json({ ...row, warning: geocodingWarning });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
   }
@@ -1230,6 +1823,7 @@ app.post('/api/courts', authRequired, async (req: AuthRequest, res) => {
 app.patch('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, res) => {
   const client = await pool.connect();
   try {
+    await ensureImageSchema();
     const court = await ownerCourt(req.params.courtId, req.user!);
     if (!court) return res.status(403).json({ error: 'Court not found or access denied.' });
     const name = String(req.body.name || court.name).trim();
@@ -1239,14 +1833,37 @@ app.patch('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, r
     if (!name) return res.status(400).json({ error: 'Tên sân là bắt buộc.' });
     if (!['open', 'closed', 'maintenance'].includes(status)) return res.status(400).json({ error: 'Trạng thái sân không hợp lệ.' });
     const normalizedPrice = Math.max(0, price || 0);
+    const fallbackAddress = [court.venue_address, court.venue_district, court.venue_city].filter(Boolean).join(', ');
+    const currentAddress = String(court.address || fallbackAddress || '').trim();
+    const courtAddress = String(req.body.address ?? currentAddress).trim();
+    const shouldResolveCoordinates = courtAddress !== currentAddress || court.latitude == null || court.longitude == null;
+    const coordinates = shouldResolveCoordinates
+      ? await resolveCourtCoordinates(courtAddress)
+      : {
+          latitude: court.latitude != null ? Number(court.latitude) : undefined,
+          longitude: court.longitude != null ? Number(court.longitude) : undefined,
+        };
+    const geocodingWarning = shouldResolveCoordinates && (coordinates.latitude == null || coordinates.longitude == null)
+      ? GEOCODING_WARNING_MESSAGE
+      : undefined;
     await client.query('BEGIN');
     const updated = (await client.query(
       `UPDATE courts
        SET name = $1, sport = $2, status = $3, price_min = $4, price_peak = $4,
-           description = $5
-       WHERE id = $6
+           description = $5, address = $6, latitude = $7, longitude = $8
+       WHERE id = $9
        RETURNING *`,
-      [name, sport, status, normalizedPrice, req.body.description || null, court.id],
+      [
+        name,
+        sport,
+        status,
+        normalizedPrice,
+        req.body.description || null,
+        courtAddress || null,
+        shouldResolveCoordinates ? coordinates.latitude ?? null : court.latitude != null ? Number(court.latitude) : null,
+        shouldResolveCoordinates ? coordinates.longitude ?? null : court.longitude != null ? Number(court.longitude) : null,
+        court.id,
+      ],
     )).rows[0];
     await client.query(
       `UPDATE time_slots ts
@@ -1287,7 +1904,7 @@ app.patch('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, r
       );
     }
     await client.query('COMMIT');
-    res.json({ ...updated, pricePerHour: Number(updated.price_min || 0) });
+    res.json({ ...updated, pricePerHour: Number(updated.price_min || 0), warning: geocodingWarning });
   } catch (error: any) {
     await client.query('ROLLBACK').catch(() => undefined);
     res.status(400).json({ error: error.message });
@@ -1296,7 +1913,23 @@ app.patch('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, r
   }
 });
 
-app.delete('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, res) => {
+app.post('/api/owner/courts/:courtId/image', authRequired, multerImageUpload, async (req: AuthRequest, res) => {
+  try {
+    await ensureImageSchema();
+    const court = await ownerCourt(req.params.courtId, req.user!);
+    if (!court) return res.status(403).json({ error: 'Court not found or access denied.' });
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: 'File tải lên phải là ảnh hợp lệ.' });
+    const imageUrl = await uploadStorageImage('courts', `${court.venue_id}/${court.id}`, file.buffer, file.mimetype, file.originalname);
+    const updated = (await query(
+      'UPDATE courts SET image_url = $1 WHERE id = $2 RETURNING *',
+      [imageUrl, court.id],
+    )).rows[0];
+    res.json({ imageUrl, court: { ...updated, imageUrl, pricePerHour: Number(updated.price_min || 0) } });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || 'Không thể thay ảnh. Vui lòng thử lại.' });
+  }
+});app.delete('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1322,7 +1955,14 @@ app.delete('/api/owner/courts/:courtId', authRequired, async (req: AuthRequest, 
 });
 
 app.get('/api/venues', authOptional, async (_req, res) => {
-  const rows = (await query('SELECT * FROM venues ORDER BY created_at DESC')).rows;
+  const rows = (await query(
+    `SELECT v.*,
+            up.owner_cover_url,
+            COALESCE(up.owner_cover_url, v.image_url) AS image_url
+     FROM venues v
+     LEFT JOIN user_profiles up ON up.user_id = v.owner_id
+     ORDER BY v.created_at DESC`,
+  )).rows;
   res.json(rows);
 });
 
@@ -1376,6 +2016,61 @@ app.get('/api/venue-requests', authOptional, async (req: AuthRequest, res) => {
     createdAt: row.created_at,
     reviewedAt: row.reviewed_at,
   })));
+});
+
+app.get('/api/notifications', authRequired, async (req: AuthRequest, res) => {
+  try {
+    await ensureNotificationSchema();
+    const rows = (await query(
+      `SELECT * FROM notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [req.user!.id],
+    )).rows;
+    res.json(rows.map(mapNotification));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/notifications/:id/read', authRequired, async (req: AuthRequest, res) => {
+  try {
+    await ensureNotificationSchema();
+    const row = (await query(
+      `UPDATE notifications SET is_read = TRUE
+       WHERE id = $1 AND user_id = $2
+       RETURNING *`,
+      [req.params.id, req.user!.id],
+    )).rows[0];
+    if (!row) return res.status(404).json({ error: 'Notification not found.' });
+    res.json(mapNotification(row));
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/notifications/read-all', authRequired, async (req: AuthRequest, res) => {
+  try {
+    await ensureNotificationSchema();
+    await query('UPDATE notifications SET is_read = TRUE WHERE user_id = $1', [req.user!.id]);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete('/api/notifications/:id', authRequired, async (req: AuthRequest, res) => {
+  try {
+    await ensureNotificationSchema();
+    const row = (await query(
+      'DELETE FROM notifications WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user!.id],
+    )).rows[0];
+    if (!row) return res.status(404).json({ error: 'Notification not found.' });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.post('/api/venue-requests/:id/approve', authRequired, async (req: AuthRequest, res) => {
@@ -1475,12 +2170,13 @@ app.post('/api/bookings', authRequired, async (req: AuthRequest, res) => {
     if (requestedSlotIds.some(id => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id))) {
       return res.status(400).json({ error: 'Khung giờ này chưa được tạo trong hệ thống. Vui lòng thử lại hoặc chọn ngày khác.' });
     }
-    await client.query('BEGIN');
     await ensureTimeSlotSchema();
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
     const slots = (await client.query(
       `SELECT ts.*, ts.date::text AS slot_date, c.venue_id, c.status AS court_status,
-              c.price_min, v.status AS venue_status
+              c.price_min, c.name AS court_name, v.name AS venue_name, v.owner_id, v.status AS venue_status
        FROM time_slots ts
        JOIN courts c ON c.id = ts.court_id
        JOIN venues v ON v.id = c.venue_id
@@ -1532,6 +2228,8 @@ app.post('/api/bookings', authRequired, async (req: AuthRequest, res) => {
         [bookingId, req.user!.id, slot.court_id, slot.venue_id, slot.id, slot.slot_date, timeRange, total, bookingGroupId, bookingCode, bookingCode, `SPORTRES-B-${bookingCode}`, notes || null],
       )).rows[0];
       createdBookingIds.push(booking.id);
+      await notifyBookingEvent(client, booking.id, 'created');
+      await notifyBookingEvent(client, booking.id, 'pending_payment');
     }
     await client.query('COMMIT');
     const createdBookings = await bookingRows('WHERE b.id = ANY($1::uuid[])', [createdBookingIds]);
@@ -1549,7 +2247,8 @@ app.post('/api/bookings', authRequired, async (req: AuthRequest, res) => {
 app.post('/api/bookings/:id/confirm-transfer', authRequired, async (req: AuthRequest, res) => {
   try {
     await ensureBookingPaymentSchema();
-    const booking = (await query(
+    await ensureNotificationSchema();
+    const updated = (await query(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1 AND user_id = $2
        )
@@ -1559,11 +2258,15 @@ app.post('/api/bookings/:id/confirm-transfer', authRequired, async (req: AuthReq
        WHERE user_id = $2
          AND payment_status = 'pending_transfer'
          AND (id = $1 OR booking_group_id = (SELECT booking_group_id FROM target))
-       RETURNING *`,
+       RETURNING id`,
       [req.params.id, req.user!.id],
-    )).rows[0];
-    if (!booking) return res.status(409).json({ error: 'Booking không tồn tại hoặc đã gửi xác nhận chuyển khoản.' });
-    res.json({ success: true, booking: mapBooking(booking) });
+    )).rows;
+    if (updated.length === 0) return res.status(409).json({ error: 'Booking không tồn tại hoặc đã gửi xác nhận chuyển khoản.' });
+    for (const booking of updated) {
+      await notifyBookingEvent({ query }, booking.id, 'transfer_submitted');
+    }
+    const booking = (await bookingRows('WHERE b.id = $1', [updated[0].id]))[0];
+    res.json({ success: true, booking });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
   }
@@ -1579,11 +2282,21 @@ app.get('/api/admin/bookings/pending-payments', authRequired, async (req: AuthRe
 });
 
 app.post('/api/admin/bookings/:id/approve-payment', authRequired, async (req: AuthRequest, res) => {
-  if (req.user!.role !== 'admin') return res.status(403).json({ error: 'Admin only.' });
+  if (!['admin', 'venue_owner', 'staff'].includes(req.user!.role)) return res.status(403).json({ error: 'Payment approval access required.' });
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    if (req.user!.role !== 'admin') {
+      const allowed = (await client.query(
+        `SELECT 1 FROM bookings b
+         JOIN venues v ON v.id = b.venue_id
+         WHERE b.id = $1 AND ($2 = 'staff' OR v.owner_id = $3)`,
+        [req.params.id, req.user!.role, req.user!.id],
+      )).rows[0];
+      if (!allowed) return res.status(403).json({ error: 'Booking not found or access denied.' });
+    }
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
     const booking = (await client.query(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1
@@ -1605,6 +2318,8 @@ app.post('/api/admin/bookings/:id/approve-payment', authRequired, async (req: Au
          AND (b.id = $1 OR b.booking_group_id = $2)`,
       [booking.id, booking.booking_group_id],
     );
+    await notifyBookingEvent(client, booking.id, 'payment_approved');
+    await notifyBookingEvent(client, booking.id, 'confirmed');
     await client.query('COMMIT');
     res.json({ success: true });
   } catch (error: any) {
@@ -1616,11 +2331,21 @@ app.post('/api/admin/bookings/:id/approve-payment', authRequired, async (req: Au
 });
 
 app.post('/api/admin/bookings/:id/reject-payment', authRequired, async (req: AuthRequest, res) => {
-  if (req.user!.role !== 'admin') return res.status(403).json({ error: 'Admin only.' });
+  if (!['admin', 'venue_owner', 'staff'].includes(req.user!.role)) return res.status(403).json({ error: 'Payment approval access required.' });
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    if (req.user!.role !== 'admin') {
+      const allowed = (await client.query(
+        `SELECT 1 FROM bookings b
+         JOIN venues v ON v.id = b.venue_id
+         WHERE b.id = $1 AND ($2 = 'staff' OR v.owner_id = $3)`,
+        [req.params.id, req.user!.role, req.user!.id],
+      )).rows[0];
+      if (!allowed) return res.status(403).json({ error: 'Booking not found or access denied.' });
+    }
     await ensureBookingPaymentSchema();
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
     const booking = (await client.query(
       `WITH target AS (
          SELECT booking_group_id FROM bookings WHERE id = $1
@@ -1642,6 +2367,7 @@ app.post('/api/admin/bookings/:id/reject-payment', authRequired, async (req: Aut
          AND (b.id = $1 OR b.booking_group_id = $2)`,
       [booking.id, booking.booking_group_id],
     );
+    await notifyBookingEvent(client, booking.id, 'payment_rejected');
     await client.query('COMMIT');
     res.json({ success: true });
   } catch (error: any) {
@@ -1658,6 +2384,7 @@ app.patch('/api/bookings/:id/status', authRequired, async (req: AuthRequest, res
     if (!['completed', 'cancelled'].includes(status)) {
       return res.status(400).json({ error: 'Invalid booking status.' });
     }
+    await ensureNotificationSchema();
     const booking = (await query(
       `UPDATE bookings b
        SET status = $1,
@@ -1681,6 +2408,14 @@ app.patch('/api/bookings/:id/status', authRequired, async (req: AuthRequest, res
     if (status === 'cancelled') {
       await query('UPDATE time_slots SET is_booked = FALSE, is_blocked = FALSE, booked_by = NULL WHERE id = $1', [booking.time_slot_id]);
     }
+    await notifyBookingEvent({ query }, booking.id, status as 'cancelled' | 'completed');
+    if (status === 'completed') {
+      const linkedMatch = (await query('SELECT id FROM matches WHERE booking_id = $1', [booking.id])).rows[0];
+      if (linkedMatch) {
+        await notifyMatchEvent({ query }, linkedMatch.id, 'ended', req.user!.id);
+        await notifyMatchEvent({ query }, linkedMatch.id, 'review', req.user!.id);
+      }
+    }
     res.json({ success: true, booking: mapBooking(booking) });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
@@ -1699,8 +2434,9 @@ app.post('/api/matches', authRequired, async (req: AuthRequest, res) => {
   const client = await pool.connect();
   try {
     const { title, sport, courtId, bookingId, address, date, time, level, maxPlayers, pricePerPlayer, description } = req.body;
-    await client.query('BEGIN');
     await ensureMatchSchema();
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
     const linkedBooking = bookingId
       ? (await client.query(
           `SELECT b.*
@@ -1723,6 +2459,7 @@ app.post('/api/matches', authRequired, async (req: AuthRequest, res) => {
       [req.user!.id, linkedBooking?.id || null, court?.id || null, venue, title, sport, address || null, date, String(time).slice(0, 5), level, maxPlayers || 10, pricePerPlayer || 0, description || null],
     )).rows[0];
     await client.query('INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [match.id, req.user!.id]);
+    await notifyMatchEvent(client, match.id, 'created', req.user!.id);
     await client.query('COMMIT');
     res.status(201).json((await matchRows()).find((item: any) => item.id === match.id));
   } catch (error: any) {
@@ -1734,16 +2471,182 @@ app.post('/api/matches', authRequired, async (req: AuthRequest, res) => {
 });
 
 app.post('/api/matches/:id/join', authRequired, async (req: AuthRequest, res) => {
+  const client = await pool.connect();
   try {
-    await query('INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.params.id, req.user!.id]);
-    const count = Number((await query('SELECT COUNT(*) FROM match_participants WHERE match_id = $1', [req.params.id])).rows[0].count);
-    const match = (await query('SELECT max_players FROM matches WHERE id = $1', [req.params.id])).rows[0];
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
+    const inserted = (await client.query(
+      'INSERT INTO match_participants (match_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING match_id',
+      [req.params.id, req.user!.id],
+    )).rows[0];
+    const count = Number((await client.query('SELECT COUNT(*) FROM match_participants WHERE match_id = $1', [req.params.id])).rows[0].count);
+    const match = (await client.query('SELECT max_players FROM matches WHERE id = $1', [req.params.id])).rows[0];
+    if (inserted) {
+      await notifyMatchEvent(client, req.params.id, 'joined', req.user!.id);
+    }
     if (match && count >= Number(match.max_players)) {
-      await query('UPDATE matches SET status = $1 WHERE id = $2', ['full', req.params.id]);
+      const updated = (await client.query(
+        "UPDATE matches SET status = 'full' WHERE id = $1 AND status <> 'full' RETURNING id",
+        [req.params.id],
+      )).rows[0];
+      if (updated) await notifyMatchEvent(client, req.params.id, 'full', req.user!.id);
+    }
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    res.status(400).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/matches/:id/leave', authRequired, async (req: AuthRequest, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureNotificationSchema();
+    await client.query('BEGIN');
+    const removed = (await client.query(
+      'DELETE FROM match_participants WHERE match_id = $1 AND user_id = $2 RETURNING match_id',
+      [req.params.id, req.user!.id],
+    )).rows[0];
+    if (removed) {
+      await client.query("UPDATE matches SET status = 'open' WHERE id = $1 AND status = 'full'", [req.params.id]);
+      await notifyMatchEvent(client, req.params.id, 'left', req.user!.id);
+    }
+    await client.query('COMMIT');
+    res.json({ success: true });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    res.status(400).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/api/matches/:id/status', authRequired, async (req: AuthRequest, res) => {
+  try {
+    const status = String(req.body.status || '');
+    if (!['in_progress', 'finished'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid match status.' });
+    }
+    await ensureNotificationSchema();
+    const match = (await query(
+      `UPDATE matches
+       SET status = $1
+       WHERE id = $2
+         AND creator_id = $3
+         AND status <> $1
+       RETURNING id`,
+      [status, req.params.id, req.user!.id],
+    )).rows[0];
+    if (!match) return res.status(404).json({ error: 'Match not found or status unchanged.' });
+    await notifyMatchEvent({ query }, req.params.id, status === 'in_progress' ? 'started' : 'ended', req.user!.id);
+    if (status === 'finished') {
+      await notifyMatchEvent({ query }, req.params.id, 'completed', req.user!.id);
     }
     res.json({ success: true });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+const AI_NOT_CONFIGURED_MESSAGE = 'AI chưa được cấu hình. Vui lòng thiết lập OPENAI_API_KEY ở backend.';
+
+const toAiText = (value: unknown, maxLength = 120) =>
+  String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
+
+const summarizeAiContext = (appContext: any) => {
+  const courts = Array.isArray(appContext?.courts) ? appContext.courts : [];
+  const matches = Array.isArray(appContext?.matches) ? appContext.matches : [];
+  const tournaments = Array.isArray(appContext?.tournaments) ? appContext.tournaments : [];
+  const user = appContext?.user && typeof appContext.user === 'object' ? appContext.user : {};
+
+  return JSON.stringify({
+    user: {
+      name: toAiText(user.name, 80),
+      role: toAiText(user.role, 40),
+      favoriteSports: Array.isArray(user.favoriteSports) ? user.favoriteSports.slice(0, 8).map((item: unknown) => toAiText(item, 30)) : [],
+      activeArea: toAiText(user.activeArea, 120),
+    },
+    courts: courts.slice(0, 12).map((court: any) => ({
+      name: toAiText(court.name, 100),
+      sport: toAiText(court.sport, 30),
+      district: toAiText(court.district, 80),
+      address: toAiText(court.address, 180),
+      priceMin: Number(court.priceMin || court.price_per_hour || 0) || undefined,
+      rating: Number(court.rating || 0) || undefined,
+      status: toAiText(court.status, 40),
+    })),
+    matches: matches.slice(0, 12).map((match: any) => ({
+      title: toAiText(match.title, 120),
+      sport: toAiText(match.sport, 30),
+      courtName: toAiText(match.courtName, 100),
+      date: toAiText(match.date, 40),
+      time: toAiText(match.time, 40),
+      level: toAiText(match.level, 40),
+      status: toAiText(match.status, 40),
+      playerCount: Array.isArray(match.players) ? match.players.length : undefined,
+      maxPlayers: Number(match.maxPlayers || 0) || undefined,
+    })),
+    tournaments: tournaments.slice(0, 8).map((tournament: any) => ({
+      title: toAiText(tournament.title, 120),
+      sport: toAiText(tournament.sport, 30),
+      status: toAiText(tournament.status, 40),
+      prizePool: toAiText(tournament.prizePool, 80),
+    })),
+  });
+};
+
+const sportResAiSystemPrompt = `
+Bạn là SportRes AI, trợ lý trong ứng dụng SportRes.
+- Trả lời bằng tiếng Việt theo mặc định, thân thiện, rõ ràng, ngắn gọn.
+- Hỗ trợ người dùng về đặt sân, ghép kèo/matchmaking, giải đấu, ví/thanh toán, tính năng chủ sân, quản lý sân và cách sử dụng SportRes.
+- Chỉ dùng dữ liệu SportRes được cung cấp trong hội thoại hoặc ngữ cảnh hệ thống. Không tự bịa tên sân, giá, địa chỉ, slot trống, giải đấu hoặc người chơi.
+- Nếu người dùng cần tình trạng sân trống theo thời gian thực, hãy giải thích rằng trợ lý chỉ có thể dùng dữ liệu do SportRes cung cấp và hướng dẫn họ kiểm tra trực tiếp trong màn hình đặt sân.
+- Không yêu cầu, hiển thị hoặc suy đoán thông tin nhạy cảm như mật khẩu, token, khóa API.
+`.trim();
+
+app.post('/api/ai/chat', async (req, res) => {
+  try {
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!message) return res.status(400).json({ error: 'message is required' });
+    if (message.length > 1000) return res.status(400).json({ error: 'message must be at most 1000 characters' });
+
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED_MESSAGE });
+
+    const history = Array.isArray(req.body?.history)
+      ? req.body.history
+          .slice(-8)
+          .map((item: any) => ({
+            role: item?.role === 'model' || item?.role === 'assistant' ? 'assistant' : 'user',
+            content: toAiText(item?.text || item?.content, 1000),
+          }))
+          .filter((item: { content: string }) => item.content)
+      : [];
+
+    const client = new OpenAI({ apiKey });
+    const completion = await client.chat.completions.create({
+      model: process.env.AI_MODEL?.trim() || 'gpt-4o-mini',
+      temperature: 0.5,
+      max_tokens: 700,
+      messages: [
+        { role: 'system', content: sportResAiSystemPrompt },
+        { role: 'system', content: `Ngữ cảnh SportRes hiện có:\n${summarizeAiContext(req.body?.appContext)}` },
+        ...history,
+        { role: 'user', content: message },
+      ],
+    });
+
+    const reply = completion.choices[0]?.message?.content?.trim()
+      || 'Xin lỗi, tôi chưa thể trả lời lúc này. Vui lòng thử lại sau.';
+    res.json({ reply });
+  } catch (error: any) {
+    console.error('[ai:chat] OpenAI request failed:', error?.message || error);
+    res.status(500).json({
+      error: 'Đã xảy ra lỗi hệ thống khi liên hệ trợ lý AI.',
+    });
   }
 });
 

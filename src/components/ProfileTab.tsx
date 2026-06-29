@@ -19,7 +19,11 @@ import {
   Star,
   UserPlus,
   CheckCircle,
-  ArrowLeft
+  ArrowLeft,
+  Upload,
+  KeyRound,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { Booking, Match, SportType, UserProfile } from '../types';
 import { createGroupedBookingHistory, AggregatedBooking } from '../utils/bookingAggregation';
@@ -30,12 +34,27 @@ type SkillLevel = UserProfile['skillLevels'][SportType];
 
 const ACTIVE_SPORTS: SportType[] = ['soccer', 'badminton', 'tennis', 'pickleball', 'basketball', 'volleyball', 'golf'];
 const SKILL_OPTIONS: SkillLevel[] = ['Beginner', 'Intermediate', 'Advanced', 'Pro'];
+const SUPPORTED_UPLOAD_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif', 'heic', 'heif'];
+const isSupportedImageFile = (file: File) => {
+  const extension = file.name.split('.').pop()?.toLowerCase() || '';
+  return file.type.startsWith('image/') || SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
+};
 
 export const ProfileTab: React.FC<{ onLogout: () => void }> = ({ onLogout }) => {
-  const { user, bookings, matches, cancelBooking, updateUserProfile, completeBooking, logoutUser, confirmBookingTransfer } = useSport();
+  const { user, bookings, matches, cancelBooking, updateUserProfile, changePassword, uploadUserAvatar, completeBooking, logoutUser, confirmBookingTransfer } = useSport();
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'error'>('success');
   const [profileSaving, setProfileSaving] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
+  const [passwordMessageType, setPasswordMessageType] = useState<'success' | 'error'>('success');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [paymentBooking, setPaymentBooking] = useState<Booking | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
 
@@ -140,6 +159,71 @@ export const ProfileTab: React.FC<{ onLogout: () => void }> = ({ onLogout }) => 
     setTimeout(() => {
       setToastMsg(null);
     }, 3000);
+  };
+
+  const handleAvatarUpload = async (file?: File) => {
+    if (!file) return;
+    if (!isSupportedImageFile(file)) {
+      triggerToast('File tải lên phải là ảnh hợp lệ.', 'error');
+      return;
+    }
+    setAvatarUploading(true);
+    try {
+      await uploadUserAvatar(file);
+      triggerToast('Đã đổi ảnh đại diện thành công!');
+    } catch (error: any) {
+      triggerToast(error.message || 'Không thể thay ảnh. Vui lòng thử lại.', 'error');
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  const showPasswordMessage = (message: string, type: 'success' | 'error') => {
+    setPasswordMessage(message);
+    setPasswordMessageType(type);
+    triggerToast(message, type);
+  };
+
+  const handleChangePassword = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!currentPassword) {
+      showPasswordMessage('Mật khẩu hiện tại là bắt buộc.', 'error');
+      return;
+    }
+    if (!newPassword) {
+      showPasswordMessage('Mật khẩu mới là bắt buộc.', 'error');
+      return;
+    }
+    if (!confirmPassword) {
+      showPasswordMessage('Xác nhận mật khẩu mới là bắt buộc.', 'error');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      showPasswordMessage('Mật khẩu mới và xác nhận mật khẩu không khớp.', 'error');
+      return;
+    }
+    if (newPassword.length < 8) {
+      showPasswordMessage('Mật khẩu mới phải có ít nhất 8 ký tự.', 'error');
+      return;
+    }
+    if (newPassword === currentPassword) {
+      showPasswordMessage('Mật khẩu mới không được trùng với mật khẩu hiện tại.', 'error');
+      return;
+    }
+
+    setPasswordSaving(true);
+    setPasswordMessage(null);
+    try {
+      const message = await changePassword({ currentPassword, newPassword, confirmPassword });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      showPasswordMessage(message, 'success');
+    } catch (error: any) {
+      showPasswordMessage(error.message || 'Không thể đổi mật khẩu. Vui lòng thử lại.', 'error');
+    } finally {
+      setPasswordSaving(false);
+    }
   };
 
   const sportLabels: Record<SportType, string> = {
@@ -366,7 +450,7 @@ export const ProfileTab: React.FC<{ onLogout: () => void }> = ({ onLogout }) => 
         <div className="relative z-10 flex items-center gap-4">
           <SafeImage
             src={user.avatar}
-            fallbackSrc="https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&q=80&w=200"
+            fallbackSrc="/sportres-logo.png"
             alt={user.name}
             className="w-16 h-16 rounded-full border-2 border-emerald-500 object-cover shadow-sm bg-neutral-100"
           />
@@ -378,6 +462,22 @@ export const ProfileTab: React.FC<{ onLogout: () => void }> = ({ onLogout }) => 
             </div>
             <h2 className="text-base font-black text-neutral-850 uppercase mt-1 leading-tight">{user.name}</h2>
             <p className="text-[10px] text-neutral-400 font-semibold mt-0.5">{user.phone}</p>
+            <label className={`mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[9px] font-black uppercase cursor-pointer transition ${
+              avatarUploading ? 'bg-neutral-100 text-neutral-400 pointer-events-none' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+            }`}>
+              <Upload size={12} />
+              {avatarUploading ? 'Đang upload...' : 'Đổi ảnh đại diện'}
+              <input
+                type="file"
+                accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.heic,.heif"
+                className="hidden"
+                disabled={avatarUploading}
+                onChange={event => {
+                  void handleAvatarUpload(event.target.files?.[0]);
+                  event.currentTarget.value = '';
+                }}
+              />
+            </label>
           </div>
         </div>
       </div>
@@ -454,6 +554,112 @@ export const ProfileTab: React.FC<{ onLogout: () => void }> = ({ onLogout }) => 
           </div>
         </div>
       </div>
+
+      <form
+        onSubmit={handleChangePassword}
+        className="bg-white rounded-2xl border border-neutral-100 p-4 text-left space-y-3.5 shadow-2xs"
+      >
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+            <KeyRound size={16} />
+          </div>
+          <div>
+            <h3 className="text-xs font-black text-neutral-700 uppercase tracking-tight">Đổi mật khẩu</h3>
+            <p className="text-[10px] text-neutral-400 font-semibold mt-0.5">Cập nhật mật khẩu đăng nhập của tài khoản này.</p>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <label htmlFor="current-password" className="text-[9px] text-neutral-400 font-bold block uppercase tracking-wider">
+              Mật khẩu hiện tại
+            </label>
+            <div className="relative">
+              <input
+                id="current-password"
+                type={showCurrentPassword ? 'text' : 'password'}
+                value={currentPassword}
+                onChange={event => setCurrentPassword(event.target.value)}
+                autoComplete="current-password"
+                disabled={passwordSaving}
+                className="w-full bg-neutral-50 border border-neutral-200 rounded-xl pl-3.5 pr-10 py-3 text-xs text-neutral-800 focus:outline-emerald-500 font-semibold transition shadow-sm disabled:text-neutral-400"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCurrentPassword(value => !value)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 p-1 rounded-lg"
+                aria-label={showCurrentPassword ? 'Ẩn mật khẩu hiện tại' : 'Hiện mật khẩu hiện tại'}
+              >
+                {showCurrentPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="new-password" className="text-[9px] text-neutral-400 font-bold block uppercase tracking-wider">
+              Mật khẩu mới
+            </label>
+            <div className="relative">
+              <input
+                id="new-password"
+                type={showNewPassword ? 'text' : 'password'}
+                value={newPassword}
+                onChange={event => setNewPassword(event.target.value)}
+                autoComplete="new-password"
+                disabled={passwordSaving}
+                className="w-full bg-neutral-50 border border-neutral-200 rounded-xl pl-3.5 pr-10 py-3 text-xs text-neutral-800 focus:outline-emerald-500 font-semibold transition shadow-sm disabled:text-neutral-400"
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewPassword(value => !value)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 p-1 rounded-lg"
+                aria-label={showNewPassword ? 'Ẩn mật khẩu mới' : 'Hiện mật khẩu mới'}
+              >
+                {showNewPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label htmlFor="confirm-password" className="text-[9px] text-neutral-400 font-bold block uppercase tracking-wider">
+              Nhập lại mật khẩu mới
+            </label>
+            <div className="relative">
+              <input
+                id="confirm-password"
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={event => setConfirmPassword(event.target.value)}
+                autoComplete="new-password"
+                disabled={passwordSaving}
+                className="w-full bg-neutral-50 border border-neutral-200 rounded-xl pl-3.5 pr-10 py-3 text-xs text-neutral-800 focus:outline-emerald-500 font-semibold transition shadow-sm disabled:text-neutral-400"
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword(value => !value)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 p-1 rounded-lg"
+                aria-label={showConfirmPassword ? 'Ẩn xác nhận mật khẩu' : 'Hiện xác nhận mật khẩu'}
+              >
+                {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {passwordMessage && (
+          <p className={`text-[11px] font-extrabold ${passwordMessageType === 'error' ? 'text-red-500' : 'text-emerald-600'}`}>
+            {passwordMessage}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={passwordSaving}
+          className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:bg-neutral-300 disabled:shadow-none active:scale-[0.98] transition text-white font-extrabold text-xs rounded-xl cursor-pointer shadow-md shadow-emerald-500/20"
+        >
+          {passwordSaving ? 'Đang đổi mật khẩu...' : 'Đổi mật khẩu'}
+        </button>
+      </form>
 
       {/* 3. GENERAL SETTINGS CONTROLS (Exact menus requested) */}
       <div className="bg-white rounded-2xl border border-neutral-100 overflow-hidden shadow-2xs text-left text-xs divide-y divide-neutral-100">

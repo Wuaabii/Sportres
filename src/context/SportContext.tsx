@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Court, CourtSchedule, Booking, Match, UserProfile, Tournament, SportType, TimeSlot, SubCourt, DemoUser, UserRole, FriendItem, PrivateChat, FriendRequest, Notification, VenueRequest, OwnerDashboardStats } from '../types';
+import { Court, CourtSchedule, Booking, Match, UserProfile, Tournament, SportType, TimeSlot, SubCourt, DemoUser, UserRole, FriendItem, PrivateChat, FriendRequest, Notification, VenueRequest, OwnerDashboardStats, AdminRevenueAnalytics } from '../types';
+import { getVenueCardImage } from '../utils/venueImages';
 
 export type CreateVenueOwnerPayload = {
   fullName: string;
@@ -16,6 +17,7 @@ interface SportContextType {
   courts: Court[];
   bookings: Booking[];
   ownerDashboardStats: OwnerDashboardStats;
+  adminRevenueAnalytics: AdminRevenueAnalytics;
   matches: Match[];
   tournaments: Tournament[];
   notifications: Notification[];
@@ -33,6 +35,7 @@ interface SportContextType {
   createOwnerCourt: (payload: {
     venueId: string;
     name: string;
+    address?: string;
     sport: Exclude<SportType, 'all'>;
     pricePerHour: number;
     status: 'open' | 'closed' | 'maintenance';
@@ -40,6 +43,7 @@ interface SportContextType {
   }) => Promise<void>;
   updateOwnerCourt: (courtId: string, payload: {
     name: string;
+    address?: string;
     sport: Exclude<SportType, 'all'>;
     pricePerHour: number;
     status: 'open' | 'closed' | 'maintenance';
@@ -56,6 +60,7 @@ interface SportContextType {
   rejectBookingPayment: (bookingId: string) => Promise<void>;
   cancelBooking: (bookingId: string) => void;
   refreshOwnerDashboardStats: () => Promise<void>;
+  refreshAdminRevenueAnalytics: () => Promise<void>;
   updateSlotAvailability: (courtId: string, subCourtId: string, date: string, slotId: string, available: boolean) => void;
   markNotificationRead: (notificationId: string) => void;
   markAllNotificationsRead: () => void;
@@ -69,6 +74,10 @@ interface SportContextType {
   setCourts: React.Dispatch<React.SetStateAction<Court[]>>;
   refreshAllData: () => void;
   updateUserProfile: (profile: Partial<UserProfile>) => Promise<UserProfile>;
+  changePassword: (payload: { currentPassword: string; newPassword: string; confirmPassword: string }) => Promise<string>;
+  uploadUserAvatar: (file: File) => Promise<UserProfile>;
+  uploadOwnerCoverImage: (file: File) => Promise<string>;
+  uploadOwnerCourtImage: (courtId: string, file: File) => Promise<string>;
   loginUser: (phone: string, password: string) => Promise<{ success: boolean; error?: string; role?: UserRole }>;
   registerUser: (payload: { fullName: string; phone: string; password: string }) => Promise<{ success: boolean; error?: string; role?: UserRole }>;
   createVenueOwner: (payload: CreateVenueOwnerPayload) => Promise<{
@@ -98,10 +107,15 @@ const AUTH_TOKEN_KEY = 'sportres_auth_token';
 
 const getAuthToken = () => localStorage.getItem(AUTH_TOKEN_KEY);
 
+const isBinaryBody = (body: BodyInit | null | undefined) =>
+  typeof FormData !== 'undefined' && body instanceof FormData
+  || typeof Blob !== 'undefined' && body instanceof Blob
+  || typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer;
+
 const apiRequest = async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
   const token = getAuthToken();
   const endpoint = `${API_BASE}${path}`;
-  const requiresAuth = path.startsWith('/api/owner/') || path.startsWith('/api/me') || path.startsWith('/api/bookings');
+  const requiresAuth = path.startsWith('/api/owner/') || path.startsWith('/api/admin/') || path.startsWith('/api/me') || path.startsWith('/api/profile') || path.startsWith('/api/bookings') || path.startsWith('/api/notifications');
   if (requiresAuth && !token) {
     console.error('[SportRes API]', { endpoint, status: 401, response: 'Missing authentication token' });
     throw new Error('Vui lòng đăng nhập lại.');
@@ -111,7 +125,7 @@ const apiRequest = async <T,>(path: string, options: RequestInit = {}): Promise<
     const response = await fetch(endpoint, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
+        ...(!isBinaryBody(options.body) ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(options.headers || {}),
       },
@@ -207,6 +221,7 @@ const normalizeUserProfile = (profile: UserProfile): UserProfile => {
     role: normalizedRole,
     full_name: profile.full_name || profile.name,
     name: profile.full_name || profile.name,
+    avatar: profile.avatar || '/sportres-logo.png',
     favoriteSports,
     skillLevels: {
       ...DEFAULT_SKILL_LEVELS,
@@ -299,7 +314,7 @@ const SPORT_IMAGE_FALLBACKS: Record<SportType, string> = {
 };
 
 const getNormalizedCourtImage = (court: Court) => {
-  const imageUrl = court.imageUrl || '';
+  const imageUrl = getVenueCardImage(court);
   if (imageUrl.includes('photo-1495567744504') || imageUrl.includes('photo-1508098682722')) {
     return SPORT_IMAGE_FALLBACKS.soccer;
   }
@@ -1239,6 +1254,12 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     monthlyRevenue: 0,
     occupancyRate: 0,
   });
+  const [adminRevenueAnalytics, setAdminRevenueAnalytics] = useState<AdminRevenueAnalytics>({
+    todayRevenue: 0,
+    sevenDayRevenue: 0,
+    monthlyRevenue: 0,
+    dailyRevenueSeries: [],
+  });
 
   const refreshOwnerDashboardStats = async () => {
     if (!['venue_owner', 'admin', 'staff'].includes(user.role)) return;
@@ -1246,20 +1267,34 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setOwnerDashboardStats(stats);
   };
 
+  const refreshAdminRevenueAnalytics = async () => {
+    if (user.role !== 'admin') return;
+    const analytics = await apiRequest<AdminRevenueAnalytics>('/api/admin/revenue-analytics');
+    setAdminRevenueAnalytics(analytics);
+  };
+
   const loadServerData = async () => {
     try {
-      const [serverCourts, serverMatches, serverBookings, serverVenueRequests] = await Promise.all([
+      const [serverCourts, serverMatches, serverBookings, serverVenueRequests, serverNotifications] = await Promise.all([
         apiRequest<Court[]>('/api/courts'),
         apiRequest<Match[]>('/api/matches'),
         apiRequest<Booking[]>('/api/bookings'),
         apiRequest<VenueRequest[]>('/api/venue-requests'),
+        getAuthToken() ? apiRequest<Notification[]>('/api/notifications') : Promise.resolve([]),
       ]);
-      setCourts(serverCourts);
+      setCourts(serverCourts.map(court => ({
+        ...court,
+        imageUrl: getVenueCardImage(court),
+      })));
       setMatches(serverMatches);
       setBookings(serverBookings);
       setVenueRequests(serverVenueRequests);
+      setNotifications(serverNotifications);
       if (['venue_owner', 'admin', 'staff'].includes(user.role)) {
         await refreshOwnerDashboardStats();
+      }
+      if (user.role === 'admin') {
+        await refreshAdminRevenueAnalytics();
       }
     } catch (error) {
       console.warn('[SportRes] Using local demo data because API hydration failed:', error);
@@ -1366,6 +1401,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const createOwnerCourt = async (payload: {
     venueId: string;
     name: string;
+    address?: string;
     sport: Exclude<SportType, 'all'>;
     pricePerHour: number;
     status: 'open' | 'closed' | 'maintenance';
@@ -1376,6 +1412,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       body: JSON.stringify({
         venueId: payload.venueId,
         name: payload.name,
+        address: payload.address,
         sport: payload.sport,
         pricePerHour: payload.pricePerHour,
         status: payload.status,
@@ -1389,6 +1426,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     courtId: string,
     payload: {
       name: string;
+      address?: string;
       sport: Exclude<SportType, 'all'>;
       pricePerHour: number;
       status: 'open' | 'closed' | 'maintenance';
@@ -1422,6 +1460,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     if (user.role === 'admin' && getAuthToken()) {
       loadAdminUsers();
+      refreshAdminRevenueAnalytics().catch(error => console.error('[admin:revenue-analytics]', error));
     }
   }, [user.role]);
 
@@ -1659,6 +1698,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           },
         })),
       })));
+      await loadServerData();
       return { success: true, bookings: savedBookings };
     } catch (error: any) {
       await loadServerData();
@@ -1758,14 +1798,31 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const markNotificationRead = (notificationId: string) => {
     setNotifications(prev => prev.map(n => n.id === notificationId ? { ...n, isRead: true } : n));
+    apiRequest(`/api/notifications/${encodeURIComponent(notificationId)}/read`, { method: 'PATCH' })
+      .then(() => loadServerData())
+      .catch(error => {
+        console.error('[notification:read]', error);
+        loadServerData();
+      });
   };
 
   const markAllNotificationsRead = () => {
     setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+    apiRequest('/api/notifications/read-all', { method: 'POST' })
+      .then(() => loadServerData())
+      .catch(error => {
+        console.error('[notification:read-all]', error);
+        loadServerData();
+      });
   };
 
   const deleteNotification = (notificationId: string) => {
     setNotifications(prev => prev.filter(n => n.id !== notificationId));
+    apiRequest(`/api/notifications/${encodeURIComponent(notificationId)}`, { method: 'DELETE' })
+      .catch(error => {
+        console.error('[notification:delete]', error);
+        loadServerData();
+      });
   };
 
   const submitVenueRequest = (request: Omit<VenueRequest, 'id' | 'ownerId' | 'ownerName' | 'ownerPhone' | 'status' | 'createdAt' | 'reviewedAt' | 'rejectionReason'>) => {
@@ -1932,6 +1989,9 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return m;
       });
     });
+    apiRequest(`/api/matches/${matchId}/leave`, { method: 'POST' })
+      .then(loadServerData)
+      .catch(error => console.error('[match:leave]', error));
   };
 
   const createMatch = (matchData: Omit<Match, 'id' | 'players' | 'status' | 'creatorId' | 'creatorName' | 'creatorAvatar'>) => {
@@ -1996,6 +2056,67 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setUser(user);
       throw error;
     }
+  };
+
+  const uploadUserAvatar = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await apiRequest<{ user: UserProfile; avatarUrl: string }>('/api/me/avatar', {
+      method: 'POST',
+      body: formData,
+    });
+    const savedProfile = normalizeUserProfile(data.user);
+    setUser(savedProfile);
+    return savedProfile;
+  };
+
+  const changePassword = async (payload: { currentPassword: string; newPassword: string; confirmPassword: string }) => {
+    const data = await apiRequest<{ success: boolean; message?: string }>('/api/profile/change-password', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    return data.message || 'Đổi mật khẩu thành công.';
+  };
+
+  const uploadOwnerCoverImage = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await apiRequest<{ owner_cover_url: string; ownerCoverUrl?: string; imageUrl?: string; updatedCourtIds?: string[] }>('/api/owner/cover', {
+      method: 'POST',
+      body: formData,
+    });
+    const coverUrl = data.owner_cover_url || data.ownerCoverUrl || data.imageUrl || '';
+    setCourts(previous => previous.map(venue => (
+      venue.ownerId === user.id
+        ? {
+          ...venue,
+          ownerCoverUrl: coverUrl,
+          imageUrl: coverUrl || venue.imageUrl,
+          subCourts: venue.subCourts.map(court => ({ ...court, imageUrl: coverUrl || court.imageUrl })),
+        }
+        : venue
+    )));
+    await loadServerData();
+    return coverUrl;
+  };
+
+  const uploadOwnerCourtImage = async (courtId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const data = await apiRequest<{ imageUrl: string }>(`/api/owner/courts/${encodeURIComponent(courtId)}/image`, {
+      method: 'POST',
+      body: formData,
+    });
+    setCourts(previous => previous.map(venue => {
+      const hasCourt = venue.subCourts.some(court => court.id === courtId);
+      if (!hasCourt) return venue;
+      return {
+        ...venue,
+        subCourts: venue.subCourts.map(court => court.id === courtId ? { ...court, imageUrl: data.imageUrl } : court),
+      };
+    }));
+    await loadServerData();
+    return data.imageUrl;
   };
 
   const loginUser = async (phone: string, password: string): Promise<{ success: boolean; error?: string; role?: UserRole }> => {
@@ -2091,6 +2212,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       courts,
       bookings,
       ownerDashboardStats,
+      adminRevenueAnalytics,
       matches,
       tournaments,
       notifications,
@@ -2114,6 +2236,7 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       rejectBookingPayment,
       cancelBooking,
       refreshOwnerDashboardStats,
+      refreshAdminRevenueAnalytics,
       updateSlotAvailability,
       markNotificationRead,
       markAllNotificationsRead,
@@ -2127,6 +2250,10 @@ export const SportProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setCourts,
       refreshAllData,
       updateUserProfile,
+      changePassword,
+      uploadUserAvatar,
+      uploadOwnerCoverImage,
+      uploadOwnerCourtImage,
       loginUser,
       registerUser,
       createVenueOwner,

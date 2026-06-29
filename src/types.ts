@@ -31,10 +31,14 @@ export interface CourtSchedule {
 export interface SubCourt {
   id: string;
   name: string; // Sân A, Sân B
+  address?: string;
+  imageUrl?: string;
   sport?: SportType;
   status?: 'open' | 'closed' | 'maintenance';
   pricePerHour?: number;
   description?: string;
+  latitude?: number;
+  longitude?: number;
   openingTime?: string;
   closingTime?: string;
   slotDuration?: 30 | 60 | 90 | 120;
@@ -52,6 +56,10 @@ export interface Court {
   rating: number;
   reviewsCount: number;
   imageUrl: string;
+  ownerCoverUrl?: string;
+  owner_cover_url?: string;
+  image?: string;
+  courtImageUrl?: string;
   priceMin: number;
   latitude?: number;
   longitude?: number;
@@ -65,6 +73,7 @@ export interface UserProfile {
   full_name?: string;
   name: string;
   avatar: string;
+  ownerCoverUrl?: string;
   phone?: string;
   role?: UserRole;
   skillLevels: { [key in SportType]: 'Beginner' | 'Intermediate' | 'Advanced' | 'Pro' };
@@ -122,6 +131,18 @@ export interface OwnerDashboardStats {
   todayRevenue: number;
   monthlyRevenue: number;
   occupancyRate: number;
+}
+
+export interface RevenueSeriesPoint {
+  date: string;
+  revenue: number;
+}
+
+export interface AdminRevenueAnalytics {
+  todayRevenue: number;
+  sevenDayRevenue: number;
+  monthlyRevenue: number;
+  dailyRevenueSeries: RevenueSeriesPoint[];
 }
 
 export interface MatchPlayer {

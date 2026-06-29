@@ -5,6 +5,7 @@ import { Calendar, Search, MapPin, Clock, Star, Dumbbell, Receipt, HelpCircle, S
 import { SafeImage, getFallbackImage } from './SafeImage';
 import { combineConsecutiveTimeRanges } from '../utils/bookingAggregation';
 import { BookingPaymentDetails } from './BookingPaymentDetails';
+import { getVenueCardImage } from '../utils/venueImages';
 
 interface BookingTabProps {
   sportFilter: SportType;
@@ -105,8 +106,51 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
     return null;
   };
 
+  type MapCourtMarker = {
+    id: string;
+    venue: Court;
+    subCourt?: SubCourt;
+    coord: { lat: number; lng: number };
+    name: string;
+    sport: SportType;
+    price: number;
+  };
+
+  const getStoredCourtCoordinates = (court: Court, subCourt?: SubCourt) => {
+    const latitude = subCourt?.latitude ?? court.latitude;
+    const longitude = subCourt?.longitude ?? court.longitude;
+    if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+      return { lat: Number(latitude), lng: Number(longitude) };
+    }
+    return null;
+  };
+
+  const getCourtMapMarkers = (sourceCourts: Court[]): MapCourtMarker[] => {
+    const markers: MapCourtMarker[] = [];
+    sourceCourts.forEach(court => {
+      const physicalCourts = court.subCourts.length > 0 ? court.subCourts : [undefined];
+      physicalCourts.forEach((subCourt, index) => {
+        const coord = getStoredCourtCoordinates(court, subCourt);
+        if (!coord) {
+          console.warn('[SportRes map] Skipping court without coordinates:', subCourt?.name || court.name, court.address);
+          return;
+        }
+        markers.push({
+          id: subCourt?.id || `${court.id}-marker-${index}`,
+          venue: court,
+          subCourt,
+          coord,
+          name: subCourt?.name || court.name,
+          sport: (subCourt?.sport || court.sport) as SportType,
+          price: Number(subCourt?.pricePerHour || court.priceMin || 0),
+        });
+      });
+    });
+    return markers;
+  };
+
   const matchesCourtFilters = (court: Court) => {
-    const activeSports = selectedSports.length > 0 ? selectedSports : [sportFilter];
+    const activeSports = selectedSports.length > 0 ? selectedSports : ['all'];
     const matchesSport = activeSports.includes('all') || activeSports.includes(court.sport);
     const query = searchQuery.trim().toLowerCase();
     const matchesSearch = !query ||
@@ -218,14 +262,12 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
     const markersGroup = markersGroupRef.current;
     markersGroup.clearLayers();
 
-    const validMapCourts = courts
-      .filter(matchesCourtFilters)
-      .map(court => ({ court, coord: getCourtMapCoordinates(court) }))
-      .filter((item): item is { court: Court; coord: { lat: number; lng: number } } => Boolean(item.coord));
+    const validMapCourts = visibleMapMarkers;
 
-    validMapCourts.forEach(({ court, coord }) => {
-      const isSelected = selectedMapCourtId === court.id;
-      const markerMeta = getSportMarkerMeta(court.sport);
+    validMapCourts.forEach(markerItem => {
+      const { venue: court, coord } = markerItem;
+      const isSelected = selectedMapCourtId === markerItem.id;
+      const markerMeta = getSportMarkerMeta(markerItem.sport);
       const iconHtml = `
         <div class="flex flex-col items-center select-none active:scale-95 transition-transform duration-150 transform -translate-x-1/2 -translate-y-[calc(100%-4px)]">
           <button
@@ -238,7 +280,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
           </button>
           <div class="mt-1 bg-white border border-neutral-200/50 shadow-md py-1 px-2.5 rounded-lg whitespace-nowrap">
             <span class="text-[10px] font-black text-neutral-800 tracking-tight">
-              ${court.name}
+              ${markerItem.name}
             </span>
           </div>
           <div class="w-2.5 h-2.5 rotate-45 bg-white border-r border-b border-neutral-200/50 -mt-1.5 shadow-3xs"></div>
@@ -255,12 +297,20 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
       const marker = L.marker([coord.lat, coord.lng], { icon: customMarkerIcon });
 
       marker.on('click', () => {
-        setSelectedMapCourtId(court.id);
+        setSelectedMapCourtId(markerItem.id);
         map.panTo([coord.lat - 0.0015, coord.lng], { animate: true, duration: 0.5 });
       });
 
       marker.addTo(markersGroup);
     });
+
+    if (!selectedMapCourtId && validMapCourts.length > 1) {
+      const bounds = L.latLngBounds(validMapCourts.map(item => [item.coord.lat, item.coord.lng]));
+      map.fitBounds(bounds, { padding: [52, 52], maxZoom: 16, animate: true });
+    } else if (!selectedMapCourtId && validMapCourts.length === 1) {
+      const only = validMapCourts[0].coord;
+      map.setView([only.lat, only.lng], 15, { animate: true });
+    }
 
   }, [showMapView, leafletLoaded, sportFilter, selectedSports, districtQuery, searchQuery, selectedMapCourtId, mapStyle, courts]);
 
@@ -461,7 +511,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
       name: court.name,
       address: `📍 ${court.address}`,
       priceLabel: `từ ${court.priceMin.toLocaleString('vi-VN')}đ/giờ`,
-      imageUrl: court.imageUrl || marketing.imageUrl,
+      imageUrl: getVenueCardImage(court, court.sport) || marketing.imageUrl,
     };
   };
 
@@ -551,6 +601,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
   const filteredCourts = courts.filter(c => {
     return matchesCourtFilters(c);
   });
+  const visibleMapMarkers = getCourtMapMarkers(filteredCourts);
 
   const sportsConfig = [
     { id: 'badminton' as SportType, name: 'Cầu lông' },
@@ -560,7 +611,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
     { id: 'volleyball' as SportType, name: 'Bóng chuyền' },
     { id: 'basketball' as SportType, name: 'Bóng rổ' },
     { id: 'golf' as SportType, name: 'Golf' },
-    { id: 'all' as SportType, name: 'Đa năng' },
+    { id: 'all' as SportType, name: 'Tất cả' },
   ];
 
   const handleSelectSlot = (slot?: TimeSlot | null) => {
@@ -679,7 +730,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
           {activeCourt && (
             <div className="bg-white rounded-2xl p-3 border border-neutral-200/50 shadow-3xs flex gap-3 items-center text-left">
               <SafeImage
-                src={localized.imageUrl || getSportFallbackImage(activeCourt.sport)}
+                src={selectedSubCourt?.imageUrl || getVenueCardImage(activeCourt, activeCourt.sport) || localized.imageUrl || getSportFallbackImage(activeCourt.sport)}
                 fallbackSrc={getSportFallbackImage(activeCourt.sport)}
                 sportType={activeCourt.sport}
                 alt={localized.name}
@@ -1079,7 +1130,8 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                   <div className="border-t border-neutral-100 pt-2 flex gap-1.5">
                     <button
                       onClick={() => {
-                        setSelectedSports([sportFilter]);
+                        setSportFilter('all');
+                        setSelectedSports(['all']);
                         setDistrictQuery('All');
                       }}
                       className="flex-1 py-1 px-2 border border-neutral-200 text-neutral-500 hover:bg-neutral-50 rounded-lg text-[10px] font-bold text-center cursor-pointer transition"
@@ -1141,6 +1193,15 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                   className="w-full h-full z-10 outline-none"
                 />
               </div>
+              {visibleMapMarkers.length === 0 && (
+                <div className="absolute inset-x-4 top-24 z-40 map-noclick">
+                  <div className="bg-white/95 border border-neutral-200 rounded-2xl px-4 py-3 text-center shadow-lg">
+                    <p className="text-xs font-bold text-neutral-600">
+                      Chưa có sân nào có vị trí hợp lệ trên bản đồ.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* 1. TOP Floated Search Input Box Over Map */}
               <div className="absolute top-4 inset-x-4 z-40 flex items-center gap-2 map-noclick">
@@ -1239,11 +1300,15 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
               {(() => {
                 if (!selectedMapCourtId) return null;
                 const realId = selectedMapCourtId;
-                const originalCourt = filteredCourts.find(c => c.id === realId);
+                const selectedMarker = getCourtMapMarkers(filteredCourts).find(marker => marker.id === realId);
+                const originalCourt = selectedMarker?.venue;
                 if (!originalCourt) return null;
 
-                const localized = getLocalizedCourtInfo(realId);
-                const resolvedName = originalCourt.name;
+                const localized = getLocalizedCourtInfo(originalCourt.id);
+                const resolvedName = selectedMarker?.subCourt
+                  ? `${originalCourt.name} - ${selectedMarker.subCourt.name}`
+                  : originalCourt.name;
+                const cardImage = getVenueCardImage(originalCourt, originalCourt.sport) || localized.imageUrl || getSportFallbackImage(originalCourt.sport);
 
                 return (
                   <div 
@@ -1251,7 +1316,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                   >
                     <div className="flex gap-3">
                       <SafeImage
-                        src={originalCourt.imageUrl || localized.imageUrl || getSportFallbackImage(originalCourt.sport)}
+                        src={cardImage}
                         fallbackSrc={getSportFallbackImage(originalCourt.sport)}
                         sportType={originalCourt.sport}
                         alt={resolvedName}
@@ -1297,10 +1362,10 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                         <button
                           onClick={() => {
                             // Expand selection & toggle to scheduler in list view
-                            setExpandedCourtId(realId);
-                            setActiveSchedulingCourtId(realId);
+                            setExpandedCourtId(originalCourt.id);
+                            setActiveSchedulingCourtId(originalCourt.id);
                             if (originalCourt.subCourts.length > 0) {
-                              setSelectedSubCourtId(originalCourt.subCourts[0].id);
+                              setSelectedSubCourtId(selectedMarker?.subCourt?.id || originalCourt.subCourts[0].id);
                             }
                             setSportFilter(originalCourt.sport);
                             setShowMapView(false);
@@ -1336,6 +1401,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                   {filteredCourts.map(court => {
                     const isExpanded = expandedCourtId === court.id;
                     const localized = getLocalizedCourtInfo(court.id);
+                    const cardImage = getVenueCardImage(court, court.sport) || localized.imageUrl || getSportFallbackImage(court.sport);
 
                     return (
                       <div
@@ -1358,7 +1424,7 @@ export const BookingTab: React.FC<BookingTabProps> = ({ sportFilter, setSportFil
                       >
                         <div className="relative h-36 w-full overflow-hidden">
                           <SafeImage
-                            src={localized.imageUrl || getSportFallbackImage(court.sport)}
+                            src={cardImage}
                             fallbackSrc={getSportFallbackImage(court.sport)}
                             sportType={court.sport}
                             alt={localized.name}

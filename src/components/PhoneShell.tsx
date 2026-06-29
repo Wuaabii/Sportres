@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw, MessageSquare, Home, Calendar, Trophy, User, CalendarCheck, LayoutDashboard, ShieldCheck } from 'lucide-react';
+import { RefreshCw, MessageSquare, Home, Calendar, Trophy, User, CalendarCheck, LayoutDashboard, ShieldCheck, Bell } from 'lucide-react';
 import { useSport } from '../context/SportContext';
 import { SafeImage } from './SafeImage';
 
@@ -16,7 +16,7 @@ export const PhoneShell: React.FC<PhoneShellProps> = ({
   setActiveTab,
   onOpenAi,
 }) => {
-  const { user } = useSport();
+  const { user, notifications } = useSport();
   const [time, setTime] = useState('');
 
   useEffect(() => {
@@ -33,10 +33,13 @@ export const PhoneShell: React.FC<PhoneShellProps> = ({
     return () => clearInterval(interval);
   }, []);
 
+  const unreadNotifications = notifications.filter(notification => !notification.isRead).length;
+
   const navItems = [
     { id: 'home', label: 'Trang chủ', icon: Home, hasBadge: false },
     { id: 'booking', label: 'Đặt sân', icon: Calendar, hasBadge: false },
     { id: 'matchmaking', label: 'Trận đấu', icon: Trophy, hasBadge: false },
+    { id: 'notifications', label: 'Thông báo', icon: Bell, hasBadge: unreadNotifications > 0, badgeCount: unreadNotifications },
     { id: 'messages', label: 'Tin nhắn', icon: MessageSquare, hasBadge: true },
     { id: 'events', label: 'Sự kiện', icon: CalendarCheck, hasBadge: false },
   ];
@@ -90,7 +93,9 @@ export const PhoneShell: React.FC<PhoneShellProps> = ({
                   />
                   <span>{item.label}</span>
                   {item.hasBadge && (
-                    <span className="ml-auto w-2 h-2 bg-red-500 rounded-full"></span>
+                    <span className="ml-auto min-w-4 h-4 px-1 bg-red-500 text-white rounded-full text-[9px] font-black flex items-center justify-center">
+                      {'badgeCount' in item ? item.badgeCount : ''}
+                    </span>
                   )}
                   {isSelected && (
                     <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-emerald-500 rounded-l-full"></div>
@@ -167,7 +172,9 @@ export const PhoneShell: React.FC<PhoneShellProps> = ({
                     }`}
                   />
                   {item.hasBadge && (
-                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full border border-white"></span>
+                    <span className="absolute -top-1.5 -right-2 min-w-4 h-4 px-1 bg-red-500 text-white rounded-full border border-white text-[8px] font-black flex items-center justify-center">
+                      {'badgeCount' in item ? item.badgeCount : ''}
+                    </span>
                   )}
                 </div>
                 <span className={`text-[9.5px] font-extrabold tracking-tight transition-colors ${isSelected ? 'text-emerald-600' : 'text-neutral-400 group-hover:text-neutral-600'}`}>

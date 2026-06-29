@@ -2,13 +2,24 @@ node_modules/
 build/
 dist/
 coverage/
+
 .DS_Store
 *.log
-.env*
-!.env.example
 *.dump
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Keep only the template
+!.env.example
+
+# Ignore SQL dumps
 *.sql
 
-# except schema
+# Except project schema/seed
 !database/schema.sql
 !database/seed.sql

@@ -185,12 +185,16 @@ CREATE TABLE courts (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     venue_id        UUID NOT NULL REFERENCES venues(id) ON DELETE CASCADE,
     name            VARCHAR(255) NOT NULL,
+    address         TEXT,
     sport           sport_type NOT NULL,
     status          court_status NOT NULL DEFAULT 'open',
+    image_url       TEXT,
     price_min       INTEGER NOT NULL DEFAULT 0,
     price_peak      INTEGER NOT NULL DEFAULT 0,
     capacity        INTEGER,
     description     TEXT,
+    latitude        DOUBLE PRECISION,
+    longitude       DOUBLE PRECISION,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -491,6 +495,7 @@ CREATE TABLE notifications (
     body          TEXT NOT NULL,
     is_read       BOOLEAN NOT NULL DEFAULT FALSE,
     reference_id  UUID,
+    event_key     VARCHAR(255) UNIQUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

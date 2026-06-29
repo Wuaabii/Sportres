@@ -14,6 +14,7 @@ import { BookingTab } from './components/BookingTab';
 import { MatchmakingTab } from './components/MatchmakingTab';
 import { MessagesTab } from './components/MessagesTab';
 import { EventsTab } from './components/EventsTab';
+import { NotificationsTab } from './components/NotificationsTab';
 import { ProfileTab } from './components/ProfileTab';
 import { ManagementTab } from './components/ManagementTab';
 import { AdminTab } from './components/AdminTab';
@@ -26,7 +27,7 @@ const AUTH_FORM_PATHS = ['/login', '/register', '/staff-login'];
 function SportResApp() {
   const [currentPath, setCurrentPath] = useState(() => window.location.pathname);
   const [activeTab, setActiveTab] = useState<string>('home');
-  const [sportFilter, setSportFilter] = useState<SportType>('soccer');
+  const [sportFilter, setSportFilter] = useState<SportType>('all');
   const [showAiAssistant, setShowAiAssistant] = useState<boolean>(false);
   const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(localStorage.getItem('sportres_auth_token')));
   const [showWelcome, setShowWelcome] = useState(() => !AUTH_FORM_PATHS.includes(window.location.pathname));
@@ -143,6 +144,8 @@ function SportResApp() {
             return <MessagesTab />;
           case 'events':
             return <EventsTab />;
+          case 'notifications':
+            return <NotificationsTab />;
           case 'profile':
             return <ProfileTab onLogout={() => { setIsAuthenticated(false); setShowWelcome(true); }} />;
           case 'management':
