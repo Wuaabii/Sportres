@@ -10,16 +10,11 @@ interface PublicProfileModalProps {
 }
 
 export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({ player, onClose }) => {
-  const { user, sendFriendRequest, startPrivateChatWith } = useSport();
+  const { user, sendFriendRequest } = useSport();
   const isCurrentUser = player.id === user.id;
 
   const handleSendFriendRequest = () => {
     sendFriendRequest({ id: player.id, name: player.name, avatar: player.avatar });
-    onClose();
-  };
-
-  const handleStartChat = () => {
-    startPrivateChatWith({ id: player.id, name: player.name, avatar: player.avatar, favoriteSport: player.skill || 'Chưa cập nhật', status: 'online', statusText: 'Sẵn sàng nhắn tin' });
     onClose();
   };
 
@@ -121,11 +116,9 @@ export const PublicProfileModal: React.FC<PublicProfileModalProps> = ({ player, 
           <div className="flex gap-3 mt-8">
             {!isCurrentUser ? (
               <>
-                <button onClick={handleSendFriendRequest} className="flex-1 bg-[#3ba55d] hover:bg-[#2e854b] text-white font-bold py-3.5 rounded-xl text-sm transition uppercase tracking-wide">
+                {/* Messaging feature temporarily hidden until future development. */}
+                <button onClick={handleSendFriendRequest} className="w-full bg-[#3ba55d] hover:bg-[#2e854b] text-white font-bold py-3.5 rounded-xl text-sm transition uppercase tracking-wide">
                   Kết bạn
-                </button>
-                <button onClick={handleStartChat} className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-bold py-3.5 rounded-xl text-sm transition uppercase tracking-wide">
-                  Trò chuyện
                 </button>
               </>
             ) : (

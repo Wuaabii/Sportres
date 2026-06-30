@@ -20,7 +20,6 @@ import {
   Star,
   ArrowLeft,
   Share2,
-  MessageSquare,
   UserPlus,
   CheckCircle2,
   Check
@@ -28,6 +27,12 @@ import {
 
 import { PublicProfileModal } from './PublicProfileModal';
 import { SafeImage, getFallbackImage } from './SafeImage';
+
+const formatVietnameseCurrency = (value: number) => `${Number(value || 0).toLocaleString('vi-VN')}đ`;
+const getCurrentPlayers = (match: Match) => match.players.length;
+const getRemainingPlayers = (match: Match) => Math.max(0, match.maxPlayers - getCurrentPlayers(match));
+const formatRemainingPlayers = (remainingPlayers: number) =>
+  remainingPlayers > 0 ? `Còn ${remainingPlayers} người` : 'Đã đủ người';
 
 export const MatchmakingTab: React.FC = () => {
   const { matches, joinMatchID, leaveMatchID, courts, createMatch, user, bookings, selectedMatchId: contextMatchId, setSelectedMatchId: setContextMatchId } = useSport();
@@ -248,12 +253,6 @@ export const MatchmakingTab: React.FC = () => {
     setTimeout(() => setToastMsg(null), 3000);
   };
 
-  // CHAT TOAST ACTION
-  const triggerChatAction = (creatorName: string) => {
-    setToastMsg(`Đã khởi tạo cuộc gọi, chuẩn bị nhắn tin với trưởng đoàn ${creatorName}...`);
-    setTimeout(() => setToastMsg(null), 3500);
-  };
-
   // Compatibility score helper
   const renderCompatibility = (match: Match) => {
     const userSkill = user.skillLevels[match.sport] || 'Intermediate';
@@ -276,7 +275,8 @@ export const MatchmakingTab: React.FC = () => {
   if (selectedMatchId && selectedMatch) {
     const isJoined = selectedMatch.players.some(p => p.id === user.id);
     const isCreator = selectedMatch.creatorId === user.id;
-    const slotsLeft = selectedMatch.maxPlayers - selectedMatch.players.length;
+    const currentPlayers = getCurrentPlayers(selectedMatch);
+    const remainingPlayers = getRemainingPlayers(selectedMatch);
 
     return (
       <div id="match-detail-page-container" className="flex-1 flex flex-col overflow-hidden bg-[#F8F9FB] select-none animate-fadeIn relative">
@@ -362,7 +362,7 @@ export const MatchmakingTab: React.FC = () => {
                   THỜI GIAN
                 </span>
                 <p className="text-xs text-neutral-800 font-black mt-0.5 leading-snug">
-                  {selectedMatch.date === 'Hôm nay' ? 'Thứ 7, 20/3' : selectedMatch.date}, {selectedMatch.time}
+                  {selectedMatch.date}, {selectedMatch.time}
                 </p>
               </div>
             </div>
@@ -380,7 +380,7 @@ export const MatchmakingTab: React.FC = () => {
                   {selectedMatch.courtName}
                 </p>
                 <p className="text-[10px] text-neutral-400 font-bold mt-0.5 truncate">
-                  {selectedMatch.address.includes('Thạch Thất') ? 'Xã Bình Yên, Thạch Thất, HN' : selectedMatch.address}
+                  {selectedMatch.address}
                 </p>
               </div>
             </div>
@@ -416,12 +416,7 @@ export const MatchmakingTab: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => triggerChatAction(selectedMatch.creatorName)}
-                className="bg-[#EFF6FF] text-[#1E40AF] hover:bg-[#DBEAFE] font-black px-4 py-1.5 rounded-full text-[10.5px] transition cursor-pointer active:scale-95"
-              >
-                Nhắn tin
-              </button>
+              {/* Messaging feature temporarily hidden until future development. */}
             </div>
           </div>
 
@@ -429,7 +424,7 @@ export const MatchmakingTab: React.FC = () => {
           <div className="text-left space-y-2">
             <div className="flex justify-between items-center px-1">
               <h3 className="text-[10px] font-black text-neutral-400 uppercase tracking-widest">
-                Người tham gia ({selectedMatch.players.length}/{selectedMatch.maxPlayers})
+                Người tham gia ({currentPlayers}/{selectedMatch.maxPlayers})
               </h3>
               
               <button 
@@ -456,7 +451,7 @@ export const MatchmakingTab: React.FC = () => {
                 ))}
                 
                 {/* Empty green circle design decoration segments representing remaining slots */}
-                {Array.from({ length: Math.min(3, slotsLeft) }).map((_, idx) => (
+                {Array.from({ length: Math.min(3, remainingPlayers) }).map((_, idx) => (
                   <div 
                     key={`empty-${idx}`} 
                     className="h-8 w-8 rounded-full bg-emerald-50 border-2 border-dashed border-emerald-300 flex items-center justify-center text-emerald-500 font-black text-[12px] ring-2 ring-white select-none shadow-3xs"
@@ -467,15 +462,15 @@ export const MatchmakingTab: React.FC = () => {
                 ))}
               </div>
 
-              {slotsLeft > 3 && (
+              {remainingPlayers > 3 && (
                 <span className="text-[10px] text-neutral-400 font-extrabold ml-1 uppercase">
-                  +{slotsLeft - 3} slot trống
+                  +{remainingPlayers - 3} slot trống
                 </span>
               )}
 
-              {slotsLeft <= 0 && (
+              {remainingPlayers === 0 && (
                 <span className="text-[10px] text-emerald-600 font-black ml-1 uppercase">
-                  Đã kín chỗ 🏟️
+                  Đã đủ người
                 </span>
               )}
             </div>
@@ -500,7 +495,7 @@ export const MatchmakingTab: React.FC = () => {
               PHÍ THAM GIA
             </span>
             <p className="text-[15px] font-black text-neutral-800 leading-none mt-1">
-              {selectedMatch.pricePerPlayer === 0 ? 'Miễn phí' : `${selectedMatch.pricePerPlayer.toLocaleString('vi-VN')} Vui`}đ
+              {selectedMatch.pricePerPlayer === 0 ? 'Miễn phí' : formatVietnameseCurrency(selectedMatch.pricePerPlayer)}
             </p>
           </div>
 
@@ -518,14 +513,14 @@ export const MatchmakingTab: React.FC = () => {
           ) : (
             <button
               onClick={() => handleJoin(selectedMatch.id)}
-              disabled={selectedMatch.status === 'full'}
+              disabled={remainingPlayers === 0}
               className={`flex items-center gap-1.5 font-black px-7 py-2.5 rounded-2xl text-[11.5px] transition cursor-pointer active:scale-95 text-white ${
-                selectedMatch.status === 'full' 
+                remainingPlayers === 0
                   ? 'bg-neutral-300 cursor-not-allowed'
                   : 'bg-[#10B981] hover:bg-emerald-600 shadow-md'
               }`}
             >
-              <UserPlus size={14} strokeWidth={2.5} /> Tham gia ngay
+              <UserPlus size={14} strokeWidth={2.5} /> {remainingPlayers === 0 ? 'Đã đủ người' : 'Tham gia ngay'}
             </button>
           )}
         </div>
@@ -536,7 +531,7 @@ export const MatchmakingTab: React.FC = () => {
             <div className="bg-white rounded-[28px] w-full max-w-sm p-4 shadow-2xl border border-neutral-100 space-y-3 max-h-[80vh] overflow-y-auto">
               <div className="flex justify-between items-center border-b border-neutral-100 pb-2">
                 <h3 className="text-xs font-black text-neutral-800 uppercase flex items-center gap-1">
-                  👥 Danh sách tham gia ({selectedMatch.players.length})
+                  👥 Danh sách tham gia ({currentPlayers}/{selectedMatch.maxPlayers})
                 </h3>
                 <button
                   onClick={() => setShowParticipantsModal(false)}
@@ -831,7 +826,7 @@ export const MatchmakingTab: React.FC = () => {
           filteredMatches.map(match => {
             const isJoined = match.players.some(p => p.id === user.id);
             const isCreator = match.creatorId === user.id;
-            const slotsLeft = match.maxPlayers - match.players.length;
+            const remainingPlayers = getRemainingPlayers(match);
 
             return (
               <div
@@ -871,10 +866,10 @@ export const MatchmakingTab: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Right peach Badge "CCN X NGƯỜI" */}
+                    {/* Right peach remaining players badge */}
                     <div className="bg-[#FFF2E6] border border-orange-100/10 px-2.5 py-0.5 rounded-lg shrink-0 select-none">
                       <span className="text-[9px] font-black tracking-wider text-[#FF7A00] block uppercase">
-                        CCN {slotsLeft > 0 ? slotsLeft : 0} NGƯỜI
+                        {formatRemainingPlayers(remainingPlayers)}
                       </span>
                     </div>
                   </div>
@@ -937,18 +932,18 @@ export const MatchmakingTab: React.FC = () => {
                           handleJoin(match.id);
                         }
                       }}
-                      disabled={match.status === 'full' && !isJoined}
+                      disabled={remainingPlayers === 0 && !isJoined}
                       className={`px-5 py-2 rounded-full text-[11px] font-black transition cursor-pointer select-none active:scale-95 shadow-2xs ${
                         isCreator
                           ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700'
                           : isJoined
                           ? 'bg-neutral-150 hover:bg-neutral-200 text-neutral-600'
-                          : match.status === 'full'
+                          : remainingPlayers === 0
                           ? 'bg-[#EFF2F5] text-neutral-400 cursor-not-allowed'
                           : 'bg-[#10B981] hover:bg-emerald-600 text-white font-extrabold'
                       }`}
                     >
-                      {isCreator ? 'Kèo của bạn' : isJoined ? 'Đã tham gia' : match.status === 'full' ? 'Hết slot' : 'Tham gia'}
+                      {isCreator ? 'Kèo của bạn' : isJoined ? 'Đã tham gia' : remainingPlayers === 0 ? 'Đã đủ người' : 'Tham gia'}
                     </button>
                   </div>
                 </div>

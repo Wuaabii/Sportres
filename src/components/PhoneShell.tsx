@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw, MessageSquare, Home, Calendar, Trophy, User, CalendarCheck, LayoutDashboard, ShieldCheck, Bell } from 'lucide-react';
+import { RefreshCw, Home, Calendar, Trophy, User, CalendarCheck, LayoutDashboard, ShieldCheck, Bell } from 'lucide-react';
 import { useSport } from '../context/SportContext';
 import { SafeImage } from './SafeImage';
 
@@ -40,7 +40,7 @@ export const PhoneShell: React.FC<PhoneShellProps> = ({
     { id: 'booking', label: 'Đặt sân', icon: Calendar, hasBadge: false },
     { id: 'matchmaking', label: 'Trận đấu', icon: Trophy, hasBadge: false },
     { id: 'notifications', label: 'Thông báo', icon: Bell, hasBadge: unreadNotifications > 0, badgeCount: unreadNotifications },
-    { id: 'messages', label: 'Tin nhắn', icon: MessageSquare, hasBadge: true },
+    // Messaging feature temporarily hidden until future development.
     { id: 'events', label: 'Sự kiện', icon: CalendarCheck, hasBadge: false },
   ];
 

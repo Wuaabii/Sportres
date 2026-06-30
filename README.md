@@ -6,7 +6,7 @@
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set `OPENAI_API_KEY` and optionally `AI_MODEL` (defaults to `gpt-4o-mini`) in your backend environment.
 3. Run the app:
    `npm run dev`
 

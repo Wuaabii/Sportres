@@ -112,112 +112,135 @@ import jwt from "jsonwebtoken";
 import { randomUUID } from "crypto";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
-import OpenAI from "openai";
 
 // src/api/assistant.ts
-import { GoogleGenAI } from "@google/genai";
-async function handleAssistantRequest(body, apiKey) {
-  const { message, history, appContext } = body;
-  console.log("AI Assistant received request:", message);
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-    return generateMockResponse(message, appContext);
-  }
-  try {
-    const ai = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build"
-        }
-      }
-    });
-    const systemInstruction = `
+import OpenAI from "openai";
+var AI_NOT_CONFIGURED_MESSAGE = "AI ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh. Vui l\xF2ng thi\u1EBFt l\u1EADp OPENAI_API_KEY \u1EDF backend.";
+var toAiText = (value, maxLength = 120) => String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+var historyText = (item) => toAiText(
+  item?.text || item?.content || (Array.isArray(item?.parts) ? item.parts.map((part) => part?.text || "").join("\n") : ""),
+  1e3
+);
+var sportName = (sport) => sport === "soccer" ? "B\xF3ng \u0111\xE1" : sport === "badminton" ? "C\u1EA7u l\xF4ng" : sport === "tennis" ? "Tennis" : sport === "basketball" ? "B\xF3ng r\u1ED5" : sport || "Th\u1EC3 thao";
+var buildSportResSystemPrompt = (appContext) => {
+  const user = appContext.user || {};
+  const courts = Array.isArray(appContext.courts) ? appContext.courts : [];
+  const matches = Array.isArray(appContext.matches) ? appContext.matches : [];
+  const tournaments = Array.isArray(appContext.tournaments) ? appContext.tournaments : [];
+  const skillLevels = user.skillLevels || {};
+  const favoriteSports = Array.isArray(user.favoriteSports) ? user.favoriteSports : [];
+  return `
 B\u1EA1n l\xE0 "SportRes AI", tr\u1EE3 l\xFD th\u1EC3 thao c\xE1 nh\xE2n th\xF4ng minh trong \u1EE9ng d\u1EE5ng SportRes (N\u1EC1n t\u1EA3ng t\xECm s\xE2n, \u0111\u1EB7t s\xE2n v\xE0 k\u1EBFt n\u1ED1i gh\xE9p c\u1EB7p th\u1EC3 thao t\u1EA1i Vi\u1EC7t Nam).
 M\u1EE5c ti\xEAu c\u1EE7a b\u1EA1n l\xE0 gi\xFAp \u0111\u1EE1 ng\u01B0\u1EDDi d\xF9ng, \u0111\u1EB7c bi\u1EC7t l\xE0 ng\u01B0\u1EDDi d\xF9ng hi\u1EC7n t\u1EA1i c\xF3 th\xF4ng tin sau:
-- T\xEAn ng\u01B0\u1EDDi d\xF9ng: ${appContext.user.name}
-- Tr\xECnh \u0111\u1ED9 th\u1EBF thao: B\xF3ng \u0111\xE1 (${appContext.user.skillLevels.soccer}), C\u1EA7u l\xF4ng (${appContext.user.skillLevels.badminton}), Tennis (${appContext.user.skillLevels.tennis}), B\xF3ng r\u1ED5 (${appContext.user.skillLevels.basketball})
-- M\xF4n th\u1EC3 thao y\xEAu th\xEDch: ${appContext.user.favoriteSports.join(", ")}
+- T\xEAn ng\u01B0\u1EDDi d\xF9ng: ${user.name || "Ng\u01B0\u1EDDi d\xF9ng SportRes"}
+- Tr\xECnh \u0111\u1ED9 th\u1EC3 thao: B\xF3ng \u0111\xE1 (${skillLevels.soccer || "Ch\u01B0a c\u1EADp nh\u1EADt"}), C\u1EA7u l\xF4ng (${skillLevels.badminton || "Ch\u01B0a c\u1EADp nh\u1EADt"}), Tennis (${skillLevels.tennis || "Ch\u01B0a c\u1EADp nh\u1EADt"}), B\xF3ng r\u1ED5 (${skillLevels.basketball || "Ch\u01B0a c\u1EADp nh\u1EADt"})
+- M\xF4n th\u1EC3 thao y\xEAu th\xEDch: ${favoriteSports.length ? favoriteSports.join(", ") : "Ch\u01B0a c\u1EADp nh\u1EADt"}
 
 D\u01B0\u1EDBi \u0111\xE2y l\xE0 d\u1EEF li\u1EC7u th\u1EDDi gian th\u1EF1c hi\u1EC7n t\u1EA1i c\u1EE7a h\u1EC7 th\u1ED1ng SportRes:
 
 DANH S\xC1CH S\xC2N TH\u1EC2 THAO \u0110ANG HO\u1EA0T \u0110\u1ED8NG:
-${appContext.courts.map((c) => `- [ID: ${c.id}] ${c.name} (${c.sport === "soccer" ? "B\xF3ng \u0111\xE1" : c.sport === "badminton" ? "C\u1EA7u l\xF4ng" : c.sport === "tennis" ? "Tennis" : "B\xF3ng r\u1ED5"}): Khu v\u1EF1c ${c.district}. Gi\xE1 t\u1EEB ${c.priceMin.toLocaleString("vi-VN")}\u0111/gi\u1EDD. \u0110\xE1nh gi\xE1: ${c.rating}\u2B50 (${c.reviewsCount} b\xE0i \u0111\xE1nh gi\xE1). \u0110\u1ECBa ch\u1EC9: ${c.address}. Ti\u1EC7n \xEDch: ${c.amenities.join(", ")}.`).join("\n")}
+${courts.map((c) => `- [ID: ${c.id}] ${c.name} (${sportName(c.sport)}): Khu v\u1EF1c ${c.district}. Gi\xE1 t\u1EEB ${Number(c.priceMin || c.price_per_hour || 0).toLocaleString("vi-VN")}\u0111/gi\u1EDD. \u0110\xE1nh gi\xE1: ${c.rating || 0}\u2B50 (${c.reviewsCount || 0} b\xE0i \u0111\xE1nh gi\xE1). \u0110\u1ECBa ch\u1EC9: ${c.address || "Ch\u01B0a c\u1EADp nh\u1EADt"}. Ti\u1EC7n \xEDch: ${Array.isArray(c.amenities) ? c.amenities.join(", ") : "Ch\u01B0a c\u1EADp nh\u1EADt"}.`).join("\n") || "- Ch\u01B0a c\xF3 d\u1EEF li\u1EC7u s\xE2n."}
 
 DANH S\xC1CH C\xC1C TR\u1EACN \u0110\u1EA4U GH\xC9P C\u1EB6P \u0110ANG TUY\u1EC2N NG\u01AF\u1EDCI (MATCHMAKING):
-${appContext.matches.map((m) => `- [ID: ${m.id}] "${m.title}" do ${m.creatorName} t\u1EA1o. B\u1ED9 m\xF4n: ${m.sport}. S\xE2n: ${m.courtName}. Th\u1EDDi gian: ${m.time}, Ng\xE0y: ${m.date}. Tr\xECnh \u0111\u1ED9 y\xEAu c\u1EA7u: ${m.level}. S\u1ED1 ng\u01B0\u1EDDi hi\u1EC7n c\xF3: ${m.players.length}/${m.maxPlayers} ng\u01B0\u1EDDi. L\u1EC7 ph\xED chia \u0111\u1EC1u: ${m.pricePerPlayer.toLocaleString("vi-VN")}\u0111/ng\u01B0\u1EDDi.`).join("\n")}
+${matches.map((m) => `- [ID: ${m.id}] "${m.title}" do ${m.creatorName || "ng\u01B0\u1EDDi d\xF9ng SportRes"} t\u1EA1o. B\u1ED9 m\xF4n: ${sportName(m.sport)}. S\xE2n: ${m.courtName}. Th\u1EDDi gian: ${m.time}, Ng\xE0y: ${m.date}. Tr\xECnh \u0111\u1ED9 y\xEAu c\u1EA7u: ${m.level}. S\u1ED1 ng\u01B0\u1EDDi hi\u1EC7n c\xF3: ${Array.isArray(m.players) ? m.players.length : 0}/${m.maxPlayers || 0} ng\u01B0\u1EDDi. L\u1EC7 ph\xED chia \u0111\u1EC1u: ${Number(m.pricePerPlayer || 0).toLocaleString("vi-VN")}\u0111/ng\u01B0\u1EDDi.`).join("\n") || "- Ch\u01B0a c\xF3 d\u1EEF li\u1EC7u tr\u1EADn gh\xE9p."}
 
 DANH S\xC1CH GI\u1EA2I \u0110\u1EA4U (TOURNAMENTS):
-${appContext.tournaments.map((t) => `- [ID: ${t.id}] "${t.title}". B\u1ED9 m\xF4n: ${t.sport}. Tr\u1EA1ng th\xE1i: ${t.status === "ongoing" ? "\u0110ang di\u1EC5n ra" : "\u0110ang m\u1EDF \u0111\u0103ng k\xFD"}. Qu\u1EF9 gi\u1EA3i th\u01B0\u1EDFng: ${t.prizePool}.`).join("\n")}
+${tournaments.map((t) => `- [ID: ${t.id}] "${t.title}". B\u1ED9 m\xF4n: ${sportName(t.sport)}. Tr\u1EA1ng th\xE1i: ${t.status === "ongoing" ? "\u0110ang di\u1EC5n ra" : "\u0110ang m\u1EDF \u0111\u0103ng k\xFD"}. Qu\u1EF9 gi\u1EA3i th\u01B0\u1EDFng: ${t.prizePool}.`).join("\n") || "- Ch\u01B0a c\xF3 d\u1EEF li\u1EC7u gi\u1EA3i \u0111\u1EA5u."}
 
 H\u01AF\u1EDANG D\u1EAAN \u1EE8NG X\u1EEC:
 1. Lu\xF4n tr\u1EA3 l\u1EDDi b\u1EB1ng ti\u1EBFng Vi\u1EC7t th\xE2n thi\u1EC7n, nhi\u1EC7t t\xECnh, n\u0103ng \u0111\u1ED9ng v\xE0 chuy\xEAn nghi\u1EC7p c\u1EE7a m\u1ED9t chuy\xEAn gia th\u1EC3 thao.
 2. D\u1EF1a v\xE0o s\u1EDF th\xEDch v\xE0 tr\xECnh \u0111\u1ED9 th\u1EC3 thao c\u1EE7a ng\u01B0\u1EDDi d\xF9ng \u0111\u1EC3 \u0111\u01B0a ra g\u1EE3i \xFD s\xE2n ho\u1EB7c tr\u1EADn gh\xE9p c\u1EB7p (Matchmaking) ph\xF9 h\u1EE3p nh\u1EA5t.
 3. Khi gi\u1EDBi thi\u1EC7u s\xE2n ho\u1EB7c k\xE8o gh\xE9p c\u1EB7p, h\xE3y n\xEAu r\xF5 T\xEAn s\xE2n, Qu\u1EADn huy\u1EC7n, Ph\xE2n kh\xFAc gi\xE1 v\xE0 v\xEC sao s\xE2n \u0111\xF3 ph\xF9 h\u1EE3p v\u1EDBi c\xE1 nh\xE2n h\u1ECD.
 4. Tr\xE1nh l\u1EB7p l\u1EA1i qu\xE1 nhi\u1EC1u v\u1EC1 m\u1EB7t k\u1EF9 thu\u1EADt, t\u1EADp trung v\xE0o vi\u1EC7c t\u1EA1o s\u1EF1 kh\xEDch l\u1EC7 v\u1EADn \u0111\u1ED9ng, r\xE8n luy\u1EC7n th\u1EC3 thao.
-`;
-    const contents = history.map((h) => ({
-      role: h.role === "model" ? "model" : "user",
-      parts: h.parts
-    }));
-    contents.push({
-      role: "user",
-      parts: [{ text: message }]
+5. Kh\xF4ng y\xEAu c\u1EA7u, hi\u1EC3n th\u1ECB ho\u1EB7c suy \u0111o\xE1n th\xF4ng tin nh\u1EA1y c\u1EA3m nh\u01B0 m\u1EADt kh\u1EA9u, token ho\u1EB7c kh\xF3a API.
+`.trim();
+};
+async function handleAssistantRequest(body) {
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  const appContext = body?.appContext || { user: {}, courts: [], matches: [], tournaments: [] };
+  if (!message) {
+    return { text: "message is required", success: false, error: "message is required", statusCode: 400 };
+  }
+  if (message.length > 1e3) {
+    return {
+      text: "Tin nh\u1EAFn qu\xE1 d\xE0i. Vui l\xF2ng nh\u1EADp t\u1ED1i \u0111a 1000 k\xFD t\u1EF1.",
+      success: false,
+      error: "message must be at most 1000 characters",
+      statusCode: 400
+    };
+  }
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return {
+      text: AI_NOT_CONFIGURED_MESSAGE,
+      success: false,
+      error: AI_NOT_CONFIGURED_MESSAGE,
+      statusCode: 503
+    };
+  }
+  try {
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY
     });
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents,
-      config: {
-        systemInstruction,
-        temperature: 0.7,
-        maxOutputTokens: 1e3
-      }
+    const history = Array.isArray(body.history) ? body.history.slice(-8).map((item) => ({
+      role: item?.role === "model" || item?.role === "assistant" ? "assistant" : "user",
+      content: historyText(item)
+    })).filter((item) => item.content) : [];
+    const completion = await openai.chat.completions.create({
+      model: process.env.AI_MODEL?.trim() || "gpt-4o-mini",
+      temperature: 0.7,
+      max_tokens: 1e3,
+      messages: [
+        { role: "system", content: buildSportResSystemPrompt(appContext) },
+        ...history,
+        { role: "user", content: message }
+      ]
     });
     return {
-      text: response.text || "Xin l\u1ED7i, t\xF4i ch\u01B0a th\u1EC3 tr\u1EA3 l\u1EDDi l\xFAc n\xE0y.",
+      text: completion.choices[0]?.message?.content?.trim() || "Xin l\u1ED7i, t\xF4i ch\u01B0a th\u1EC3 tr\u1EA3 l\u1EDDi l\xFAc n\xE0y.",
       success: true
     };
   } catch (error) {
-    console.error("Gemini API Error:", error);
+    console.error("[ai:assistant] OpenAI request failed:", error?.message || error);
+    const fallback = generateMockResponse(message, appContext);
     return {
-      text: `Ch\xE0o ${appContext.user.name}, ch\xFAc m\u1ED9t ng\xE0y \u0111\u1EA7y s\u1EE9c tr\u1EBB! R\u1EA5t ti\u1EBFc, k\u1EBFt n\u1ED1i \u0111\u1EBFn m\xE1y ch\u1EE7 AI \u0111ang b\u1EADn t\xED ch\xFAt, tuy nhi\xEAn d\u1EF1a v\xE0o d\u1EEF li\u1EC7u h\u1EC7 th\u1ED1ng, t\xF4i \u0111\u1EC1 xu\u1EA5t b\u1EA1n n\xEAn tr\u1EA3i nghi\u1EC7m **${appContext.courts[0]?.name || "S\xE2n b\xF3ng K\u1EF3 H\xF2a"}** n\u1EB1m \u1EDF ${appContext.courts[0]?.district || "Qu\u1EADn 10"} ho\u1EB7c k\u1EBFt n\u1ED1i v\u1EDBi k\xE8o **"${appContext.matches[0]?.title || "Giao l\u01B0u c\u1EA7u l\xF4ng"}"** \u0111ang r\u1EA5t n\xF3ng! Ch\xFAc b\u1EA1n c\xF3 nh\u1EEFng gi\u1EDD ph\xFAt th\u1EC3 thao s\u1EA3ng kho\xE1i!`,
+      ...fallback,
       success: false,
-      error: error.message
+      error: error?.message || "OpenAI request failed"
     };
   }
 }
 function generateMockResponse(message, appContext) {
   const query3 = message.toLowerCase();
-  const userName = appContext.user.name;
+  const user = appContext?.user || {};
+  const userName = user.name || "b\u1EA1n";
+  const courts = Array.isArray(appContext?.courts) ? appContext.courts : [];
+  const matches = Array.isArray(appContext?.matches) ? appContext.matches : [];
+  const tournaments = Array.isArray(appContext?.tournaments) ? appContext.tournaments : [];
   let text = "";
   if (query3.includes("s\xE2n") || query3.includes("t\xECm") || query3.includes("\u0111\u1EB7t")) {
-    const recommendedCourt = appContext.courts[Math.floor(Math.random() * appContext.courts.length)];
-    text = `Ch\xE0o **${userName}**! \u{1F3DF}\uFE0F \u0110\u1EC3 h\u1ED7 tr\u1EE3 b\u1EA1n t\xECm s\xE2n \u0111\u1EA5u l\xFD t\u01B0\u1EDFng, t\xF4i ph\xE1t hi\u1EC7n s\xE2n **${recommendedCourt.name}** t\u1EA1i ${recommendedCourt.district} s\u1EDF h\u1EEFu \u0111\xE1nh gi\xE1 r\u1EA5t cao (${recommendedCourt.rating}\u2B50) v\xE0 c\u1EF1c k\u1EF3 ph\xF9 h\u1EE3p cho tr\xECnh th\u1EC3 thao c\u1EE7a b\u1EA1n.
+    const recommendedCourt = courts[Math.floor(Math.random() * courts.length)];
+    text = recommendedCourt ? `Ch\xE0o **${userName}**! \u0110\u1EC3 h\u1ED7 tr\u1EE3 b\u1EA1n t\xECm s\xE2n \u0111\u1EA5u l\xFD t\u01B0\u1EDFng, t\xF4i ph\xE1t hi\u1EC7n s\xE2n **${recommendedCourt.name}** t\u1EA1i ${recommendedCourt.district} s\u1EDF h\u1EEFu \u0111\xE1nh gi\xE1 r\u1EA5t cao (${recommendedCourt.rating || 0}\u2B50) v\xE0 ph\xF9 h\u1EE3p v\u1EDBi tr\xECnh th\u1EC3 thao c\u1EE7a b\u1EA1n.
 
-Ngo\xE0i ra, b\u1EA1n c\u0169ng c\xF3 th\u1EC3 m\u1EDF tab **"T\xECm S\xE2n"** trong \u1EE9ng d\u1EE5ng b\u1EB1ng c\xE1ch g\xF5 thanh t\xECm ki\u1EBFm, ch\u1ECDn l\u1ECDc qu\u1EADn mong mu\u1ED1n v\xE0 b\u1EA5m \u0110\u1EB7t slot ph\xF9 h\u1EE3p nh\u1EA5t \u0111\u1EC3 thanh to\xE1n t\u1EF1 \u0111\u1ED9ng ngay t\u1EE9c th\xEC!`;
+B\u1EA1n c\xF3 th\u1EC3 m\u1EDF tab **"T\xECm S\xE2n"**, ch\u1ECDn khu v\u1EF1c mong mu\u1ED1n v\xE0 b\u1EA5m \u0110\u1EB7t slot ph\xF9 h\u1EE3p nh\u1EA5t.` : `Ch\xE0o **${userName}**! Hi\u1EC7n t\xF4i ch\u01B0a th\u1EA5y d\u1EEF li\u1EC7u s\xE2n ph\xF9 h\u1EE3p trong ng\u1EEF c\u1EA3nh hi\u1EC7n t\u1EA1i. B\u1EA1n h\xE3y m\u1EDF tab **"T\xECm S\xE2n"** \u0111\u1EC3 l\u1ECDc theo khu v\u1EF1c, m\xF4n th\u1EC3 thao v\xE0 khung gi\u1EDD mong mu\u1ED1n nh\xE9.`;
   } else if (query3.includes("gh\xE9p") || query3.includes("k\u1EBFt n\u1ED1i") || query3.includes("tr\u1EADn") || query3.includes("\u0111\u1ED1i")) {
-    const openMatch = appContext.matches.find((m) => m.status === "open");
+    const openMatch = matches.find((m) => m.status === "open");
     if (openMatch) {
-      text = `Ch\xE0o **${userName}**! \u{1F91D} Tr\xEAn h\u1EC7 th\u1ED1ng hi\u1EC7n \u0111ang tuy\u1EC3n qu\xE2n kh\u1EA9n c\u1EA5p cho tr\u1EADn: **"${openMatch.title}"** t\u1EA1i *${openMatch.courtName}* (${openMatch.time} ng\xE0y h\xF4m nay).
+      text = `Ch\xE0o **${userName}**! Tr\xEAn h\u1EC7 th\u1ED1ng hi\u1EC7n \u0111ang tuy\u1EC3n ng\u01B0\u1EDDi cho tr\u1EADn: **"${openMatch.title}"** t\u1EA1i *${openMatch.courtName}* (${openMatch.time} ng\xE0y ${openMatch.date}).
 
-Tr\u1EADn \u0111\u1EA5u n\xE0y y\xEAu c\u1EA7u tr\xECnh \u0111\u1ED9 **${openMatch.level}** v\xE0 hi\u1EC7n c\xF3 ${openMatch.players.length}/${openMatch.maxPlayers} ng\u01B0\u1EDDi. B\u1EA1n c\xF3 th\u1EC3 sang th\u1EB3ng tab **"Gh\xE9p K\xE8o"** \u0111\u1EC3 tham gia ngay \u0111\u1EC3 giao l\u01B0u s\u1EE9c kh\u1ECFe v\xE0 m\u1EDF r\u1ED9ng v\xF2ng k\u1EBFt n\u1ED1i!`;
+Tr\u1EADn n\xE0y y\xEAu c\u1EA7u tr\xECnh \u0111\u1ED9 **${openMatch.level}** v\xE0 hi\u1EC7n c\xF3 ${Array.isArray(openMatch.players) ? openMatch.players.length : 0}/${openMatch.maxPlayers || 0} ng\u01B0\u1EDDi. B\u1EA1n c\xF3 th\u1EC3 sang tab **"Gh\xE9p K\xE8o"** \u0111\u1EC3 tham gia.`;
     } else {
-      text = `Ch\xE0o **${userName}**! Hi\u1EC7n t\u1EA1i c\xE1c k\xE8o \u0111\u1EA5u \u0111ang t\u1EA1m k\xEDn ch\u1ED7. Tuy nhi\xEAn b\u1EA1n ho\xE0n to\xE0n c\xF3 th\u1EC3 t\u1EF1 t\u1EA1o m\u1ED9t k\xE8o \u0111\u1EA5u m\u1EDBi t\u1EA1i m\u1EE5c **"Gh\xE9p K\xE8o" \u2794 "T\u1EA1o tr\u1EADn \u0111\u1EA5u"**, h\u1EC7 th\u1ED1ng s\u1EBD l\u1EADp t\u1EE9c th\xF4ng b\xE1o v\xE0 g\u1EE3i \xFD cho nh\u1EEFng ng\u01B0\u1EDDi c\xF9ng tr\xECnh \u0111\u1ED9 th\u1EC3 thao t\u1EA1i khu v\u1EF1c l\xE2n c\u1EADn gia nh\u1EADp c\xF9ng b\u1EA1n!`;
+      text = `Ch\xE0o **${userName}**! Hi\u1EC7n t\u1EA1i c\xE1c k\xE8o \u0111\u1EA5u \u0111ang t\u1EA1m k\xEDn ch\u1ED7 ho\u1EB7c ch\u01B0a c\xF3 d\u1EEF li\u1EC7u ph\xF9 h\u1EE3p. B\u1EA1n c\xF3 th\u1EC3 t\u1EF1 t\u1EA1o m\u1ED9t k\xE8o m\u1EDBi t\u1EA1i m\u1EE5c **"Gh\xE9p K\xE8o" -> "T\u1EA1o tr\u1EADn \u0111\u1EA5u"** \u0111\u1EC3 m\u1EDDi ng\u01B0\u1EDDi ch\u01A1i c\xF9ng tr\xECnh \u0111\u1ED9 tham gia.`;
     }
   } else if (query3.includes("gi\u1EA3i") || query3.includes("\u0111\u1EA5u") || query3.includes("tournament")) {
-    const tour = appContext.tournaments[0];
-    text = `Ch\xE0o **${userName}**! \u{1F3C6} Hi\u1EC7n t\u1EA1i SportRes \u0111ang t\xE0i tr\u1EE3 ch\xEDnh cho gi\u1EA3i \u0111\u1EA5u c\u1EF1c hot: **"${tour.title}"** quy t\u1EE5 c\xE1c \u0111\u1ED9i tuy\u1EC3n phong tr\xE0o m\u1EA1nh nh\u1EA5t v\u1EDBi t\u1ED5ng gi\u1EA3i th\u01B0\u1EDFng l\xEAn \u0111\u1EBFn **${tour.prizePool}**!
+    const tour = tournaments[0];
+    text = tour ? `Ch\xE0o **${userName}**! Hi\u1EC7n SportRes \u0111ang c\xF3 gi\u1EA3i \u0111\u1EA5u **"${tour.title}"** v\u1EDBi b\u1ED9 m\xF4n ${sportName(tour.sport)} v\xE0 t\u1ED5ng gi\u1EA3i th\u01B0\u1EDFng **${tour.prizePool}**.
 
-B\u1EA1n h\xE3y v\xE0o tab **"S\u1EF1 ki\u1EC7n & Gi\u1EA3i \u0111\u1EA5u"** \u0111\u1EC3 xem th\xF4ng tin, l\u1ECBch thi \u0111\u1EA5u v\xE0 \u0111\u0103ng k\xFD tham gia nh\xE9!`;
+B\u1EA1n h\xE3y v\xE0o tab **"S\u1EF1 ki\u1EC7n & Gi\u1EA3i \u0111\u1EA5u"** \u0111\u1EC3 xem th\xF4ng tin, l\u1ECBch thi \u0111\u1EA5u v\xE0 \u0111\u0103ng k\xFD tham gia nh\xE9.` : `Ch\xE0o **${userName}**! Hi\u1EC7n t\xF4i ch\u01B0a th\u1EA5y d\u1EEF li\u1EC7u gi\u1EA3i \u0111\u1EA5u trong ng\u1EEF c\u1EA3nh hi\u1EC7n t\u1EA1i. B\u1EA1n h\xE3y ki\u1EC3m tra tab **"S\u1EF1 ki\u1EC7n & Gi\u1EA3i \u0111\u1EA5u"** \u0111\u1EC3 xem c\xE1c gi\u1EA3i m\u1EDBi nh\u1EA5t nh\xE9.`;
   } else {
-    text = `Ch\xE0o **${userName}**! R\u1EA5t vui \u0111\u01B0\u1EE3c \u0111\u1ED3ng h\xE0nh c\xF9ng b\u1EA1n tr\xEAn \u1EE9ng d\u1EE5ng SportRes. \u{1F680}
+    text = `Ch\xE0o **${userName}**! R\u1EA5t vui \u0111\u01B0\u1EE3c \u0111\u1ED3ng h\xE0nh c\xF9ng b\u1EA1n tr\xEAn \u1EE9ng d\u1EE5ng SportRes.
 
-T\xF4i c\xF3 th\u1EC3 gi\xFAp g\xEC cho b\u1EA1n h\xF4m nay?
-- \u{1F3DF}\uFE0F **T\xECm v\xE0 \u0111\u1EC1 xu\u1EA5t s\xE2n \u0111\u1EA5u tr\u1ED1ng** g\u1EA7n b\u1EA1n.
-- \u{1F91D} **T\xECm \u0111\u1ED1i th\u1EE7 v\xE0 gh\xE9p k\xE8o giao l\u01B0u** \u0111\xFAng tr\xECnh \u0111\u1ED9 c\u1EE7a b\u1EA1n.
-- \u{1F3C6} **Th\xF4ng tin c\xE1c gi\u1EA3i \u0111\u1EA5u** phong tr\xE0o \u0111ang di\u1EC5n ra.
-- \u26A1 **Gi\u1EA3i \u0111\xE1p th\u1EAFc m\u1EAFc** k\u1EF9 thu\u1EADt t\u1EADp luy\u1EC7n ho\u1EB7c qu\u1EA3n l\xFD l\u1ECBch s\xE2n cho ch\u1EE7 s\xE2n.
-
-H\xE3y chia s\u1EBB m\xF4n th\u1EC3 thao b\u1EA1n mu\u1ED1n ch\u01A1i h\xF4m nay nh\xE9!`;
+T\xF4i c\xF3 th\u1EC3 gi\xFAp b\u1EA1n t\xECm s\xE2n, g\u1EE3i \xFD k\xE8o gh\xE9p ph\xF9 h\u1EE3p, xem th\xF4ng tin gi\u1EA3i \u0111\u1EA5u, ho\u1EB7c h\u01B0\u1EDBng d\u1EABn c\xE1c t\xEDnh n\u0103ng v\xED/thanh to\xE1n v\xE0 qu\u1EA3n l\xFD s\xE2n. H\xE3y chia s\u1EBB m\xF4n th\u1EC3 thao b\u1EA1n mu\u1ED1n ch\u01A1i h\xF4m nay nh\xE9!`;
   }
   return {
     text,
@@ -252,9 +275,11 @@ var inferSupabaseUrlFromDatabaseUrl = () => {
     return "";
   }
 };
-var SUPABASE_URL = (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, "");
-var SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || "";
-var SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "media";
+var getStorageConfig = () => ({
+  supabaseUrl: (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, ""),
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+  storageBucket: process.env.SUPABASE_STORAGE_BUCKET || "media"
+});
 var IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024;
 var SUPPORTED_IMAGE_EXTENSIONS = /* @__PURE__ */ new Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "avif", "heic", "heif"]);
 var SUPPORTED_IMAGE_MIME_EXTENSIONS = {
@@ -269,17 +294,13 @@ var SUPPORTED_IMAGE_MIME_EXTENSIONS = {
   "image/heic": "heic",
   "image/heif": "heif"
 };
-var getStorageConfigError = () => {
+var getStorageConfigError = (config = getStorageConfig()) => {
   const missing = [];
-  if (!SUPABASE_URL) missing.push("SUPABASE_URL");
-  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!config.supabaseUrl) missing.push("SUPABASE_URL");
+  if (!config.serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
   if (!missing.length) return null;
   return "Supabase Storage ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh. Vui l\xF2ng thi\u1EBFt l\u1EADp SUPABASE_URL v\xE0 SUPABASE_SERVICE_ROLE_KEY.";
 };
-var storageConfigError = getStorageConfigError();
-if (storageConfigError) {
-  console.warn(`[SportRes Storage] ${storageConfigError}`);
-}
 var bookingCodeFromId = (bookingId) => `SPORTRES_${bookingId.replaceAll("-", "").slice(0, 12).toUpperCase()}`;
 var DEMO_PASSWORDS = {
   owner1: "Owner@123",
@@ -410,20 +431,37 @@ app.use("/api/owner", (req, res, next) => {
   next();
 });
 var supabaseAdmin = null;
+var supabaseAdminConfig = null;
 var mediaBucketReady = null;
+var mediaBucketReadyFor = null;
 var getSupabaseAdmin = () => {
+  const config = getStorageConfig();
+  const storageConfigError = getStorageConfigError(config);
   if (storageConfigError) throw new Error(storageConfigError);
-  supabaseAdmin ||= createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false }
-  });
+  if (!supabaseAdmin || supabaseAdminConfig?.supabaseUrl !== config.supabaseUrl || supabaseAdminConfig?.serviceRoleKey !== config.serviceRoleKey) {
+    supabaseAdmin = createClient(config.supabaseUrl, config.serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    });
+    supabaseAdminConfig = {
+      supabaseUrl: config.supabaseUrl,
+      serviceRoleKey: config.serviceRoleKey
+    };
+  }
   return supabaseAdmin;
 };
 var ensureMediaBucket = async () => {
+  const { supabaseUrl, storageBucket } = getStorageConfig();
+  const bucketCacheKey = `${supabaseUrl}
+${storageBucket}`;
+  if (mediaBucketReadyFor !== bucketCacheKey) {
+    mediaBucketReady = null;
+    mediaBucketReadyFor = bucketCacheKey;
+  }
   mediaBucketReady ||= (async () => {
-    const { error } = await getSupabaseAdmin().storage.getBucket(SUPABASE_STORAGE_BUCKET);
+    const { error } = await getSupabaseAdmin().storage.getBucket(storageBucket);
     if (!error) return;
     if (error.message.toLowerCase().includes("not found")) {
-      throw new Error("Bucket l\u01B0u \u1EA3nh ch\u01B0a t\u1ED3n t\u1EA1i. Vui l\xF2ng t\u1EA1o bucket media trong Supabase Storage.");
+      throw new Error(`Bucket l\u01B0u \u1EA3nh ch\u01B0a t\u1ED3n t\u1EA1i. Vui l\xF2ng t\u1EA1o bucket ${storageBucket} trong Supabase Storage.`);
     }
     throw new Error(error.message);
   })();
@@ -457,14 +495,15 @@ var uniqueImagePath = (folder, ownerId, mimeType, originalName) => `${folder}/${
 async function uploadStorageImage(folder, ownerId, buffer, contentType, originalName) {
   validateImageUpload(contentType, buffer.length, originalName);
   await ensureMediaBucket();
+  const { storageBucket } = getStorageConfig();
   const objectPath = uniqueImagePath(folder, ownerId, contentType, originalName);
-  const { error } = await getSupabaseAdmin().storage.from(SUPABASE_STORAGE_BUCKET).upload(objectPath, buffer, {
+  const { error } = await getSupabaseAdmin().storage.from(storageBucket).upload(objectPath, buffer, {
     contentType: contentType || "image/*",
     upsert: true,
     cacheControl: "3600"
   });
   if (error) throw new Error(error.message);
-  const { data } = getSupabaseAdmin().storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(objectPath);
+  const { data } = getSupabaseAdmin().storage.from(storageBucket).getPublicUrl(objectPath);
   return data.publicUrl;
 }
 var memoryImageUpload = multer({
@@ -2522,100 +2561,17 @@ app.patch("/api/matches/:id/status", authRequired, async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 });
-var AI_NOT_CONFIGURED_MESSAGE = "AI ch\u01B0a \u0111\u01B0\u1EE3c c\u1EA5u h\xECnh. Vui l\xF2ng thi\u1EBFt l\u1EADp OPENAI_API_KEY \u1EDF backend.";
-var toAiText = (value, maxLength = 120) => String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
-var summarizeAiContext = (appContext) => {
-  const courts = Array.isArray(appContext?.courts) ? appContext.courts : [];
-  const matches = Array.isArray(appContext?.matches) ? appContext.matches : [];
-  const tournaments = Array.isArray(appContext?.tournaments) ? appContext.tournaments : [];
-  const user = appContext?.user && typeof appContext.user === "object" ? appContext.user : {};
-  return JSON.stringify({
-    user: {
-      name: toAiText(user.name, 80),
-      role: toAiText(user.role, 40),
-      favoriteSports: Array.isArray(user.favoriteSports) ? user.favoriteSports.slice(0, 8).map((item) => toAiText(item, 30)) : [],
-      activeArea: toAiText(user.activeArea, 120)
-    },
-    courts: courts.slice(0, 12).map((court) => ({
-      name: toAiText(court.name, 100),
-      sport: toAiText(court.sport, 30),
-      district: toAiText(court.district, 80),
-      address: toAiText(court.address, 180),
-      priceMin: Number(court.priceMin || court.price_per_hour || 0) || void 0,
-      rating: Number(court.rating || 0) || void 0,
-      status: toAiText(court.status, 40)
-    })),
-    matches: matches.slice(0, 12).map((match) => ({
-      title: toAiText(match.title, 120),
-      sport: toAiText(match.sport, 30),
-      courtName: toAiText(match.courtName, 100),
-      date: toAiText(match.date, 40),
-      time: toAiText(match.time, 40),
-      level: toAiText(match.level, 40),
-      status: toAiText(match.status, 40),
-      playerCount: Array.isArray(match.players) ? match.players.length : void 0,
-      maxPlayers: Number(match.maxPlayers || 0) || void 0
-    })),
-    tournaments: tournaments.slice(0, 8).map((tournament) => ({
-      title: toAiText(tournament.title, 120),
-      sport: toAiText(tournament.sport, 30),
-      status: toAiText(tournament.status, 40),
-      prizePool: toAiText(tournament.prizePool, 80)
-    }))
-  });
-};
-var sportResAiSystemPrompt = `
-B\u1EA1n l\xE0 SportRes AI, tr\u1EE3 l\xFD trong \u1EE9ng d\u1EE5ng SportRes.
-- Tr\u1EA3 l\u1EDDi b\u1EB1ng ti\u1EBFng Vi\u1EC7t theo m\u1EB7c \u0111\u1ECBnh, th\xE2n thi\u1EC7n, r\xF5 r\xE0ng, ng\u1EAFn g\u1ECDn.
-- H\u1ED7 tr\u1EE3 ng\u01B0\u1EDDi d\xF9ng v\u1EC1 \u0111\u1EB7t s\xE2n, gh\xE9p k\xE8o/matchmaking, gi\u1EA3i \u0111\u1EA5u, v\xED/thanh to\xE1n, t\xEDnh n\u0103ng ch\u1EE7 s\xE2n, qu\u1EA3n l\xFD s\xE2n v\xE0 c\xE1ch s\u1EED d\u1EE5ng SportRes.
-- Ch\u1EC9 d\xF9ng d\u1EEF li\u1EC7u SportRes \u0111\u01B0\u1EE3c cung c\u1EA5p trong h\u1ED9i tho\u1EA1i ho\u1EB7c ng\u1EEF c\u1EA3nh h\u1EC7 th\u1ED1ng. Kh\xF4ng t\u1EF1 b\u1ECBa t\xEAn s\xE2n, gi\xE1, \u0111\u1ECBa ch\u1EC9, slot tr\u1ED1ng, gi\u1EA3i \u0111\u1EA5u ho\u1EB7c ng\u01B0\u1EDDi ch\u01A1i.
-- N\u1EBFu ng\u01B0\u1EDDi d\xF9ng c\u1EA7n t\xECnh tr\u1EA1ng s\xE2n tr\u1ED1ng theo th\u1EDDi gian th\u1EF1c, h\xE3y gi\u1EA3i th\xEDch r\u1EB1ng tr\u1EE3 l\xFD ch\u1EC9 c\xF3 th\u1EC3 d\xF9ng d\u1EEF li\u1EC7u do SportRes cung c\u1EA5p v\xE0 h\u01B0\u1EDBng d\u1EABn h\u1ECD ki\u1EC3m tra tr\u1EF1c ti\u1EBFp trong m\xE0n h\xECnh \u0111\u1EB7t s\xE2n.
-- Kh\xF4ng y\xEAu c\u1EA7u, hi\u1EC3n th\u1ECB ho\u1EB7c suy \u0111o\xE1n th\xF4ng tin nh\u1EA1y c\u1EA3m nh\u01B0 m\u1EADt kh\u1EA9u, token, kh\xF3a API.
-`.trim();
 app.post("/api/ai/chat", async (req, res) => {
   try {
-    const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
-    if (!message) return res.status(400).json({ error: "message is required" });
-    if (message.length > 1e3) return res.status(400).json({ error: "message must be at most 1000 characters" });
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED_MESSAGE });
-    const history = Array.isArray(req.body?.history) ? req.body.history.slice(-8).map((item) => ({
-      role: item?.role === "model" || item?.role === "assistant" ? "assistant" : "user",
-      content: toAiText(item?.text || item?.content, 1e3)
-    })).filter((item) => item.content) : [];
-    const client = new OpenAI({ apiKey });
-    const completion = await client.chat.completions.create({
-      model: process.env.AI_MODEL?.trim() || "gpt-4o-mini",
-      temperature: 0.5,
-      max_tokens: 700,
-      messages: [
-        { role: "system", content: sportResAiSystemPrompt },
-        { role: "system", content: `Ng\u1EEF c\u1EA3nh SportRes hi\u1EC7n c\xF3:
-${summarizeAiContext(req.body?.appContext)}` },
-        ...history,
-        { role: "user", content: message }
-      ]
-    });
-    const reply = completion.choices[0]?.message?.content?.trim() || "Xin l\u1ED7i, t\xF4i ch\u01B0a th\u1EC3 tr\u1EA3 l\u1EDDi l\xFAc n\xE0y. Vui l\xF2ng th\u1EED l\u1EA1i sau.";
-    res.json({ reply });
-  } catch (error) {
-    console.error("[ai:chat] OpenAI request failed:", error?.message || error);
-    res.status(500).json({
-      error: "\u0110\xE3 x\u1EA3y ra l\u1ED7i h\u1EC7 th\u1ED1ng khi li\xEAn h\u1EC7 tr\u1EE3 l\xFD AI."
-    });
-  }
-});
-app.post("/api/assistant", async (req, res) => {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    const response = await handleAssistantRequest(req.body, apiKey);
-    res.json(response);
+    const response = await handleAssistantRequest(req.body);
+    if (!response.success && response.statusCode) {
+      return res.status(response.statusCode).json({ error: response.error || response.text });
+    }
+    res.json({ reply: response.text, success: response.success });
   } catch (error) {
     console.error("Server side error handling assistant request:", error);
     res.status(500).json({
-      success: false,
-      text: "\u0110\xE3 x\u1EA3y ra l\u1ED7i h\u1EC7 th\u1ED1ng khi li\xEAn h\u1EC7 tr\u1EE3 l\xFD \u1EA3o.",
-      error: error.message
+      error: "\u0110\xE3 x\u1EA3y ra l\u1ED7i h\u1EC7 th\u1ED1ng khi li\xEAn h\u1EC7 tr\u1EE3 l\xFD AI."
     });
   }
 });

@@ -7,7 +7,6 @@ import jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
 import multer from 'multer';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
 import { handleAssistantRequest } from './src/api/assistant.js';
 
 dotenv.config();
@@ -43,9 +42,11 @@ const inferSupabaseUrlFromDatabaseUrl = () => {
   }
 };
 
-const SUPABASE_URL = (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, '');
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
-const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'media';
+const getStorageConfig = () => ({
+  supabaseUrl: (process.env.SUPABASE_URL || inferSupabaseUrlFromDatabaseUrl()).replace(/\/$/, ''),
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
+  storageBucket: process.env.SUPABASE_STORAGE_BUCKET || 'media',
+});
 const IMAGE_UPLOAD_LIMIT_BYTES = 5 * 1024 * 1024;
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif', 'heic', 'heif']);
 const SUPPORTED_IMAGE_MIME_EXTENSIONS: Record<string, string> = {
@@ -73,18 +74,13 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   'image/heif': 'heif',
 };
 
-const getStorageConfigError = () => {
+const getStorageConfigError = (config = getStorageConfig()) => {
   const missing: string[] = [];
-  if (!SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!config.supabaseUrl) missing.push('SUPABASE_URL');
+  if (!config.serviceRoleKey) missing.push('SUPABASE_SERVICE_ROLE_KEY');
   if (!missing.length) return null;
   return 'Supabase Storage chưa được cấu hình. Vui lòng thiết lập SUPABASE_URL và SUPABASE_SERVICE_ROLE_KEY.';
 };
-
-const storageConfigError = getStorageConfigError();
-if (storageConfigError) {
-  console.warn(`[SportRes Storage] ${storageConfigError}`);
-}
 
 const bookingCodeFromId = (bookingId: string) =>
   `SPORTRES_${bookingId.replaceAll('-', '').slice(0, 12).toUpperCase()}`;
@@ -240,22 +236,44 @@ app.use('/api/owner', (req: AuthRequest, res, next) => {
 });
 
 let supabaseAdmin: SupabaseClient | null = null;
+let supabaseAdminConfig: { supabaseUrl: string; serviceRoleKey: string } | null = null;
 let mediaBucketReady: Promise<void> | null = null;
+let mediaBucketReadyFor: string | null = null;
 
 const getSupabaseAdmin = () => {
+  const config = getStorageConfig();
+  const storageConfigError = getStorageConfigError(config);
   if (storageConfigError) throw new Error(storageConfigError);
-  supabaseAdmin ||= createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+
+  if (
+    !supabaseAdmin
+    || supabaseAdminConfig?.supabaseUrl !== config.supabaseUrl
+    || supabaseAdminConfig?.serviceRoleKey !== config.serviceRoleKey
+  ) {
+    supabaseAdmin = createClient(config.supabaseUrl, config.serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    supabaseAdminConfig = {
+      supabaseUrl: config.supabaseUrl,
+      serviceRoleKey: config.serviceRoleKey,
+    };
+  }
   return supabaseAdmin;
 };
 
 const ensureMediaBucket = async () => {
+  const { supabaseUrl, storageBucket } = getStorageConfig();
+  const bucketCacheKey = `${supabaseUrl}\n${storageBucket}`;
+  if (mediaBucketReadyFor !== bucketCacheKey) {
+    mediaBucketReady = null;
+    mediaBucketReadyFor = bucketCacheKey;
+  }
+
   mediaBucketReady ||= (async () => {
-    const { error } = await getSupabaseAdmin().storage.getBucket(SUPABASE_STORAGE_BUCKET);
+    const { error } = await getSupabaseAdmin().storage.getBucket(storageBucket);
     if (!error) return;
     if (error.message.toLowerCase().includes('not found')) {
-      throw new Error('Bucket lưu ảnh chưa tồn tại. Vui lòng tạo bucket media trong Supabase Storage.');
+      throw new Error(`Bucket lưu ảnh chưa tồn tại. Vui lòng tạo bucket ${storageBucket} trong Supabase Storage.`);
     }
     throw new Error(error.message);
   })();
@@ -304,11 +322,12 @@ const uniqueImagePath = (folder: UploadFolder, ownerId: string, mimeType: string
 async function uploadStorageImage(folder: UploadFolder, ownerId: string, buffer: Buffer, contentType: string, originalName?: string) {
   validateImageUpload(contentType, buffer.length, originalName);
   await ensureMediaBucket();
+  const { storageBucket } = getStorageConfig();
 
   const objectPath = uniqueImagePath(folder, ownerId, contentType, originalName);
   const { error } = await getSupabaseAdmin()
     .storage
-    .from(SUPABASE_STORAGE_BUCKET)
+    .from(storageBucket)
     .upload(objectPath, buffer, {
       contentType: contentType || 'image/*',
       upsert: true,
@@ -318,7 +337,7 @@ async function uploadStorageImage(folder: UploadFolder, ownerId: string, buffer:
 
   const { data } = getSupabaseAdmin()
     .storage
-    .from(SUPABASE_STORAGE_BUCKET)
+    .from(storageBucket)
     .getPublicUrl(objectPath);
   return data.publicUrl;
 }
@@ -2551,116 +2570,17 @@ app.patch('/api/matches/:id/status', authRequired, async (req: AuthRequest, res)
   }
 });
 
-const AI_NOT_CONFIGURED_MESSAGE = 'AI chưa được cấu hình. Vui lòng thiết lập OPENAI_API_KEY ở backend.';
-
-const toAiText = (value: unknown, maxLength = 120) =>
-  String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
-
-const summarizeAiContext = (appContext: any) => {
-  const courts = Array.isArray(appContext?.courts) ? appContext.courts : [];
-  const matches = Array.isArray(appContext?.matches) ? appContext.matches : [];
-  const tournaments = Array.isArray(appContext?.tournaments) ? appContext.tournaments : [];
-  const user = appContext?.user && typeof appContext.user === 'object' ? appContext.user : {};
-
-  return JSON.stringify({
-    user: {
-      name: toAiText(user.name, 80),
-      role: toAiText(user.role, 40),
-      favoriteSports: Array.isArray(user.favoriteSports) ? user.favoriteSports.slice(0, 8).map((item: unknown) => toAiText(item, 30)) : [],
-      activeArea: toAiText(user.activeArea, 120),
-    },
-    courts: courts.slice(0, 12).map((court: any) => ({
-      name: toAiText(court.name, 100),
-      sport: toAiText(court.sport, 30),
-      district: toAiText(court.district, 80),
-      address: toAiText(court.address, 180),
-      priceMin: Number(court.priceMin || court.price_per_hour || 0) || undefined,
-      rating: Number(court.rating || 0) || undefined,
-      status: toAiText(court.status, 40),
-    })),
-    matches: matches.slice(0, 12).map((match: any) => ({
-      title: toAiText(match.title, 120),
-      sport: toAiText(match.sport, 30),
-      courtName: toAiText(match.courtName, 100),
-      date: toAiText(match.date, 40),
-      time: toAiText(match.time, 40),
-      level: toAiText(match.level, 40),
-      status: toAiText(match.status, 40),
-      playerCount: Array.isArray(match.players) ? match.players.length : undefined,
-      maxPlayers: Number(match.maxPlayers || 0) || undefined,
-    })),
-    tournaments: tournaments.slice(0, 8).map((tournament: any) => ({
-      title: toAiText(tournament.title, 120),
-      sport: toAiText(tournament.sport, 30),
-      status: toAiText(tournament.status, 40),
-      prizePool: toAiText(tournament.prizePool, 80),
-    })),
-  });
-};
-
-const sportResAiSystemPrompt = `
-Bạn là SportRes AI, trợ lý trong ứng dụng SportRes.
-- Trả lời bằng tiếng Việt theo mặc định, thân thiện, rõ ràng, ngắn gọn.
-- Hỗ trợ người dùng về đặt sân, ghép kèo/matchmaking, giải đấu, ví/thanh toán, tính năng chủ sân, quản lý sân và cách sử dụng SportRes.
-- Chỉ dùng dữ liệu SportRes được cung cấp trong hội thoại hoặc ngữ cảnh hệ thống. Không tự bịa tên sân, giá, địa chỉ, slot trống, giải đấu hoặc người chơi.
-- Nếu người dùng cần tình trạng sân trống theo thời gian thực, hãy giải thích rằng trợ lý chỉ có thể dùng dữ liệu do SportRes cung cấp và hướng dẫn họ kiểm tra trực tiếp trong màn hình đặt sân.
-- Không yêu cầu, hiển thị hoặc suy đoán thông tin nhạy cảm như mật khẩu, token, khóa API.
-`.trim();
-
 app.post('/api/ai/chat', async (req, res) => {
   try {
-    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
-    if (!message) return res.status(400).json({ error: 'message is required' });
-    if (message.length > 1000) return res.status(400).json({ error: 'message must be at most 1000 characters' });
-
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED_MESSAGE });
-
-    const history = Array.isArray(req.body?.history)
-      ? req.body.history
-          .slice(-8)
-          .map((item: any) => ({
-            role: item?.role === 'model' || item?.role === 'assistant' ? 'assistant' : 'user',
-            content: toAiText(item?.text || item?.content, 1000),
-          }))
-          .filter((item: { content: string }) => item.content)
-      : [];
-
-    const client = new OpenAI({ apiKey });
-    const completion = await client.chat.completions.create({
-      model: process.env.AI_MODEL?.trim() || 'gpt-4o-mini',
-      temperature: 0.5,
-      max_tokens: 700,
-      messages: [
-        { role: 'system', content: sportResAiSystemPrompt },
-        { role: 'system', content: `Ngữ cảnh SportRes hiện có:\n${summarizeAiContext(req.body?.appContext)}` },
-        ...history,
-        { role: 'user', content: message },
-      ],
-    });
-
-    const reply = completion.choices[0]?.message?.content?.trim()
-      || 'Xin lỗi, tôi chưa thể trả lời lúc này. Vui lòng thử lại sau.';
-    res.json({ reply });
-  } catch (error: any) {
-    console.error('[ai:chat] OpenAI request failed:', error?.message || error);
-    res.status(500).json({
-      error: 'Đã xảy ra lỗi hệ thống khi liên hệ trợ lý AI.',
-    });
-  }
-});
-
-app.post('/api/assistant', async (req, res) => {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    const response = await handleAssistantRequest(req.body, apiKey);
-    res.json(response);
+    const response = await handleAssistantRequest(req.body);
+    if (!response.success && response.statusCode) {
+      return res.status(response.statusCode).json({ error: response.error || response.text });
+    }
+    res.json({ reply: response.text, success: response.success });
   } catch (error: any) {
     console.error('Server side error handling assistant request:', error);
     res.status(500).json({
-      success: false,
-      text: 'Đã xảy ra lỗi hệ thống khi liên hệ trợ lý ảo.',
-      error: error.message,
+      error: 'Đã xảy ra lỗi hệ thống khi liên hệ trợ lý AI.',
     });
   }
 });

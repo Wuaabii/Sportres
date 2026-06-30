@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --outfile=server.js --format=esm --external:express --external:@google/genai --external:dotenv --external:pg --external:bcryptjs --external:jsonwebtoken --external:multer --external:@supabase/supabase-js --external:openai",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --outfile=server.js --format=esm --external:express --external:dotenv --external:pg --external:bcryptjs --external:jsonwebtoken --external:multer --external:@supabase/supabase-js --external:openai",
     "start": "node server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
@@ -16,7 +16,6 @@
     "backfill:court-coordinates": "tsx scripts/backfill-court-coordinates.ts"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@supabase/supabase-js": "^2.108.2",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
